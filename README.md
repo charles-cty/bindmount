@@ -71,10 +71,11 @@ standard library (`syscall`), no cgo.
 ## CLI usage
 
 ```text
-bindmount add [--read-only] [--merged] [--silo <job>] <virtual-root> <target>
+bindmount add [--merged] [--silo <job>] <virtual-root> <target>
+bindmount add [--merged] [--silo <job>] <root=target | root==target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target|root==target [--merged]]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
@@ -105,7 +106,6 @@ bindmount remove C:\virtual         # removes it
 
 Options:
 
-- `--read-only` — the mapping cannot be written through.
 - `--merged` — recursively merge the existing virtual-root directory with the
   target; the target wins on name collisions. This is a merged namespace,
   **not** an OverlayFS/CoW layer: writes and deletes act directly on the
@@ -120,7 +120,7 @@ the links, and launches a command inside:
 
 ```powershell
 # Run elevated. Creates the silo, two links, and runs a shell inside.
-bindmount exec --link C:\app\data=D:\shared\data --link C:\app\cfg=D:\cfg-ro --read-only mysilo -- cmd.exe
+bindmount exec --link C:\app\data=D:\shared\data --link C:\app\cfg==D:\cfg-ro mysilo -- cmd.exe
 ```
 
 Inside that `cmd.exe`, `C:\app\data` resolves to `D:\shared\data` and
@@ -136,6 +136,18 @@ bindmount list --silo mysilo
 bindmount add --silo mysilo C:\more D:\more-backing
 bindmount remove --silo mysilo C:\more
 ```
+
+Read-only mode is part of each mapping specification. Use one equals sign
+for a writable mapping and two equals signs for a read-only mapping:
+
+```powershell
+bindmount add C:\Windows=C:\Windows
+bindmount add C:\Windows==C:\Windows
+bindmount exec --link C:\data=D:\shared --link C:\config==D:\cfg mysilo -- cmd.exe
+```
+
+The old standalone `--read-only` link modifier is not accepted. This avoids
+accidentally applying one mount's protection setting to a different mount.
 
 > **Note on `exec`:** on the tested build (26100), `CreateProcess` with
 > `PROC_THREAD_ATTRIBUTE_JOB_LIST` fails with `ERROR_INVALID_PARAMETER` when

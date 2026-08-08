@@ -20,8 +20,9 @@ Usage:
   bindmount <command> [arguments]
 
 Commands:
-  add <virtual-root> <target>     Create a bind link
-        [--read-only]               Make the mapping read-only
+  add <virtual-root> <target>     Create a writable bind link
+  add <root=target>               Create a writable bind link
+  add <root==target>              Create a read-only bind link
         [--merged]                  Merge virtual root contents with the target
         [--silo <job-name>]         Scope the mapping to a silo job (default: global)
 
@@ -135,12 +136,25 @@ func (s *siloScope) open() (job winapi.Handle, closeFn func(), err error) {
 }
 
 func newAddCommand() *cobra.Command {
-	var readOnly, merged bool
+	var merged bool
 	var silo string
-	cmd := &cobra.Command{Use: "add <virtual-root> <target>", Args: cobra.ExactArgs(2), RunE: func(_ *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "add <virtual-root> <target> | <root[=|==]target>", Args: func(_ *cobra.Command, args []string) error {
+		if len(args) != 1 && len(args) != 2 {
+			return errors.New("add requires either one root=target spec or two path arguments")
+		}
+		return nil
+	}, RunE: func(_ *cobra.Command, args []string) error {
+		readOnly := false
+		if len(args) == 1 {
+			root, target, specReadOnly, ok := splitLinkSpec(args[0])
+			if !ok {
+				return fmt.Errorf("invalid mapping %q: want root=target or root==target for read-only", args[0])
+			}
+			args = []string{root, target}
+			readOnly = specReadOnly
+		}
 		return addMapping(args[0], args[1], readOnly, merged, silo)
 	}}
-	cmd.Flags().BoolVar(&readOnly, "read-only", false, "create a read-only mapping")
 	cmd.Flags().BoolVar(&merged, "merged", false, "merge the virtual root with the target")
 	cmd.Flags().StringVar(&silo, "silo", "", "scope the mapping to a silo job")
 	return cmd

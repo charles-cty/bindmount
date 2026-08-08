@@ -8,15 +8,16 @@ import (
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"bindmount/internal/bindfilter"
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root[=|==]target [--merged]] <job-name> -- <command> [args...]"
 
-// cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+// cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root=target|root==target [--merged]]... <job-name> -- <command> [args...]
 //
 // It creates a job object, promotes it to a silo, optionally creates
 // silo-scoped bind links, spawns the command inside the silo via
@@ -25,7 +26,7 @@ const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--re
 //
 // Example:
 //
-//	bindmount exec --link C:\app\data=D:\shared\data --read-only mysilo -- cmd.exe /c dir C:\app\data
+//	bindmount exec --link C:\app\data=D:\shared\data --link C:\app\cfg==D:\cfg-ro mysilo -- cmd.exe /c dir C:\app\data
 func cmdExec(args []string) error {
 	// Split at "--": before it are our flags, after it the command.
 	var ourArgs, cmdArgs []string
@@ -240,8 +241,8 @@ type linkSpec struct {
 	readOnly, merged bool
 }
 
-// parseLinkFlags scans args for --link/-l root=target and the modifiers
-// --read-only/--merged that apply to the most recent --link.
+// parseLinkFlags scans args for --link/-l root=target (writable) or
+// root==target (read-only). --merged applies to the most recent link.
 func parseLinkFlags(args []string) ([]linkSpec, error) {
 	var specs []linkSpec
 	for i := 0; i < len(args); i++ {
@@ -251,16 +252,11 @@ func parseLinkFlags(args []string) ([]linkSpec, error) {
 			if i >= len(args) {
 				return nil, errors.New("--link requires root=target")
 			}
-			root, target, ok := splitLinkSpec(args[i])
+			root, target, readOnly, ok := splitLinkSpec(args[i])
 			if !ok {
-				return nil, fmt.Errorf("invalid --link %q: want root=target", args[i])
+				return nil, fmt.Errorf("invalid --link %q: want root=target or root==target for read-only", args[i])
 			}
-			specs = append(specs, linkSpec{root: root, target: target})
-		case "--read-only":
-			if len(specs) == 0 {
-				return nil, errors.New("--read-only must follow a --link")
-			}
-			specs[len(specs)-1].readOnly = true
+			specs = append(specs, linkSpec{root: root, target: target, readOnly: readOnly})
 		case "--merged":
 			if len(specs) == 0 {
 				return nil, errors.New("--merged must follow a --link")
@@ -273,13 +269,16 @@ func parseLinkFlags(args []string) ([]linkSpec, error) {
 	return specs, nil
 }
 
-func splitLinkSpec(s string) (root, target string, ok bool) {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '=' {
-			return s[:i], s[i+1:], i > 0 && i < len(s)-1
-		}
+func splitLinkSpec(s string) (root, target string, readOnly, ok bool) {
+	separator := "="
+	if i := strings.Index(s, "=="); i > 0 {
+		separator = "=="
 	}
-	return "", "", false
+	i := strings.Index(s, separator)
+	if i <= 0 || i+len(separator) >= len(s) {
+		return "", "", false, false
+	}
+	return s[:i], s[i+len(separator):], separator == "==", true
 }
 
 func createSiloLink(job syscall.Handle, l linkSpec, verbose bool) error {
