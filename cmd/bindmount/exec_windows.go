@@ -14,7 +14,7 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]"
 
 // cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
 //
@@ -48,6 +48,7 @@ func cmdExec(args []string) error {
 	rootDir := ""
 	resolveExecutableFlag := false
 	resolveExecutableSet := false
+	verbose := false
 	filteredArgs := make([]string, 0, len(ourArgs))
 	for i := 0; i < len(ourArgs); i++ {
 		switch ourArgs[i] {
@@ -65,6 +66,8 @@ func cmdExec(args []string) error {
 		case "--no-resolve-executable":
 			resolveExecutableFlag = false
 			resolveExecutableSet = true
+		case "--verbose":
+			verbose = true
 		default:
 			filteredArgs = append(filteredArgs, ourArgs[i])
 		}
@@ -125,19 +128,19 @@ func cmdExec(args []string) error {
 		return fmt.Errorf("promote job to silo: %w", err)
 	}
 	if rootDir != "" {
-		if err := createRootMappings(job, rootDir); err != nil {
+		if err := createRootMappings(job, rootDir, verbose); err != nil {
 			return err
 		}
 	}
 	if resolveExecutableFlag {
-		if err := createExecutableMapping(job, executablePath); err != nil {
+		if err := createExecutableMapping(job, executablePath, verbose); err != nil {
 			return err
 		}
 	}
 
 	// Create any requested silo-scoped links before launching the process.
 	for _, l := range linkSpecs {
-		if err := createSiloLink(job, l); err != nil {
+		if err := createSiloLink(job, l, verbose); err != nil {
 			return err
 		}
 	}
@@ -168,7 +171,7 @@ func resolveExecutable(command string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func createExecutableMapping(job syscall.Handle, executablePath string) error {
+func createExecutableMapping(job syscall.Handle, executablePath string, verbose bool) error {
 	virtualRoot := filepath.Dir(executablePath)
 	volume := filepath.VolumeName(virtualRoot)
 	if volume != "" && filepath.Clean(virtualRoot) == filepath.Clean(volume+string(filepath.Separator)) {
@@ -177,10 +180,13 @@ func createExecutableMapping(job syscall.Handle, executablePath string) error {
 	if err := bindfilter.CreateSilo(job, virtualRoot, virtualRoot, bindfilter.Options{}); err != nil {
 		return fmt.Errorf("create executable mapping %s -> %s: %w", virtualRoot, virtualRoot, err)
 	}
+	if verbose {
+		fmt.Printf("bindmount: mapping executable %s -> %s\n", virtualRoot, virtualRoot)
+	}
 	return nil
 }
 
-func createRootMappings(job syscall.Handle, dataDir string) error {
+func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error {
 	if dataDir == "" {
 		return errors.New("root data directory is required")
 	}
@@ -196,6 +202,9 @@ func createRootMappings(job syscall.Handle, dataDir string) error {
 		}
 		if err := bindfilter.CreateSilo(job, root, target, bindfilter.Options{}); err != nil {
 			return fmt.Errorf("create root mapping %s -> %s: %w", root, target, err)
+		}
+		if verbose {
+			fmt.Printf("bindmount: mapping drive %s -> %s\n", root, target)
 		}
 	}
 	return nil
@@ -248,11 +257,14 @@ func splitLinkSpec(s string) (root, target string, ok bool) {
 	return "", "", false
 }
 
-func createSiloLink(job syscall.Handle, l linkSpec) error {
+func createSiloLink(job syscall.Handle, l linkSpec, verbose bool) error {
 	opts := bindfilter.Options{ReadOnly: l.readOnly, Merged: l.merged}
 	err := bindfilter.CreateSilo(job, l.root, l.target, opts)
 	if err != nil {
 		return fmt.Errorf("create silo link %s -> %s: %w", l.root, l.target, err)
+	}
+	if verbose {
+		fmt.Printf("bindmount: mapping user %s -> %s\n", l.root, l.target)
 	}
 	// Mapping setup is intentionally quiet for exec: the launched command is
 	// the user-facing process, and its console should not be prefixed by

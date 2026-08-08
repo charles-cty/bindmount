@@ -74,7 +74,7 @@ standard library (`syscall`), no cgo.
 bindmount add [--read-only] [--merged] [--silo <job>] <virtual-root> <target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
