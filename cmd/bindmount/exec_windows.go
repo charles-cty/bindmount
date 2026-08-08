@@ -131,6 +131,13 @@ func cmdExec(args []string) error {
 		if err := createRootMappings(job, rootDir, verbose); err != nil {
 			return err
 		}
+		workingDir, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get current working directory: %w", err)
+		}
+		if err := createWorkingDirectoryMapping(job, workingDir, verbose); err != nil {
+			return err
+		}
 	}
 	if resolveExecutableFlag {
 		if err := createExecutableMapping(job, executablePath, verbose); err != nil {
@@ -206,6 +213,24 @@ func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error 
 		if verbose {
 			fmt.Printf("bindmount: mapping drive %s -> %s\n", root, target)
 		}
+	}
+	return nil
+}
+
+// createWorkingDirectoryMapping restores the caller's current directory
+// after root mode shadows its drive with the portable backing tree. A drive
+// root needs no narrower mapping because it is already the root mapping.
+func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, verbose bool) error {
+	workingDir = filepath.Clean(workingDir)
+	volume := filepath.VolumeName(workingDir)
+	if volume != "" && workingDir == filepath.Clean(volume+string(filepath.Separator)) {
+		return nil
+	}
+	if err := bindfilter.CreateSilo(job, workingDir, workingDir, bindfilter.Options{}); err != nil {
+		return fmt.Errorf("create working-directory mapping %s -> %s: %w", workingDir, workingDir, err)
+	}
+	if verbose {
+		fmt.Printf("bindmount: mapping working directory %s -> %s\n", workingDir, workingDir)
 	}
 	return nil
 }
