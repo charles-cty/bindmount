@@ -71,11 +71,11 @@ standard library (`syscall`), no cgo.
 ## CLI usage
 
 ```text
-bindmount add [--merged] [--silo <job>] <virtual-root> <target>
-bindmount add [--merged] [--silo <job>] <root=target | root==target>
+bindmount add [--silo <job>] <virtual-root> <target>
+bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target|root==target [--merged]]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
@@ -104,10 +104,10 @@ bindmount list C:\                  # lists the mapping
 bindmount remove C:\virtual         # removes it
 ```
 
-Options:
+Mapping syntax:
 
-- `--merged` — recursively merge the existing virtual-root directory with the
-  target; the target wins on name collisions. This is a merged namespace,
+- A `+` prefix makes a mapping merged: the existing virtual-root directory is
+  recursively merged with the target; the target wins on name collisions. This is a merged namespace,
   **not** an OverlayFS/CoW layer: writes and deletes act directly on the
   backing tree, no copy-up or whiteouts. See
   [docs/BindFilterAPI.md](docs/BindFilterAPI.md#observed-merged-bind-behavior).
@@ -137,17 +137,21 @@ bindmount add --silo mysilo C:\more D:\more-backing
 bindmount remove --silo mysilo C:\more
 ```
 
-Read-only mode is part of each mapping specification. Use one equals sign
-for a writable mapping and two equals signs for a read-only mapping:
+Read-only and merged modes are part of each mapping specification. Use one
+equals sign for a writable mapping, two equals signs for a read-only mapping,
+and prefix the separator with `+` for a merged mapping:
 
 ```powershell
 bindmount add C:\Windows=C:\Windows
 bindmount add C:\Windows==C:\Windows
-bindmount exec --link C:\data=D:\shared --link C:\config==D:\cfg mysilo -- cmd.exe
+bindmount add C:\data+=D:\shared
+bindmount add C:\config+==D:\cfg
+bindmount exec --link C:\data=D:\shared --link C:\config+==D:\cfg mysilo -- cmd.exe
 ```
 
-The old standalone `--read-only` link modifier is not accepted. This avoids
-accidentally applying one mount's protection setting to a different mount.
+The old standalone `--read-only` and `--merged` link modifiers are not
+accepted. This avoids accidentally applying one mount's settings to a
+different mount.
 
 > **Note on `exec`:** on the tested build (26100), `CreateProcess` with
 > `PROC_THREAD_ATTRIBUTE_JOB_LIST` fails with `ERROR_INVALID_PARAMETER` when

@@ -184,13 +184,16 @@ $addButton.Add_Click({
         if (-not $addVirtual.Text -or -not $addTarget.Text) {
             throw 'Enter both a virtual root and backing target.'
         }
-        $mapping = if ($addReadOnly.Checked) {
+        $mapping = if ($addMerged.Checked -and $addReadOnly.Checked) {
+            "$($addVirtual.Text)+==$($addTarget.Text)"
+        } elseif ($addMerged.Checked) {
+            "$($addVirtual.Text)+=$($addTarget.Text)"
+        } elseif ($addReadOnly.Checked) {
             "$($addVirtual.Text)==$($addTarget.Text)"
         } else {
             "$($addVirtual.Text)=$($addTarget.Text)"
         }
         $arguments = @('add', $mapping)
-        if ($addMerged.Checked) { $arguments += '--merged' }
         if ($addSiloCheck.Checked) {
             if (-not $addSilo.Text) { throw 'Enter a silo name.' }
             $arguments += @('--silo', $addSilo.Text)
@@ -247,7 +250,7 @@ $execArgs.ScrollBars = 'Vertical'
 $execArgs.Location = New-Object Drawing.Point(180, 101)
 $execArgs.Size = New-Object Drawing.Size(660, 60)
 $execTab.Controls.Add($execArgs)
-Add-Label $execTab 'Links (root=target writable, root==target read-only):' 20 175
+Add-Label $execTab 'Links (root=target, root==target read-only, root+=target merged):' 20 175
 $execLinks = New-Object Windows.Forms.TextBox
 $execLinks.Multiline = $true
 $execLinks.ScrollBars = 'Vertical'
@@ -260,11 +263,6 @@ $execWindows.Location = New-Object Drawing.Point(20, 280)
 $execWindows.AutoSize = $true
 $execWindows.Checked = $true
 $execTab.Controls.Add($execWindows)
-$execMerged = New-Object Windows.Forms.CheckBox
-$execMerged.Text = 'Merged links (all listed links)'
-$execMerged.Location = New-Object Drawing.Point(220, 280)
-$execMerged.AutoSize = $true
-$execTab.Controls.Add($execMerged)
 $execRoot = New-Object Windows.Forms.CheckBox
 $execRoot.Text = 'Shadow all visible drives (portable root)'
 $execRoot.Location = New-Object Drawing.Point(20, 310)
@@ -305,7 +303,6 @@ $execButton.Add_Click({
             if ($link -match '(?i)^C:\\(?:Windows(?:\\|=)|=)') {
                 $hasWindowsRoot = $true
             }
-            if ($execMerged.Checked) { $arguments += '--merged' }
         }
         if ($execWindows.Checked -and -not $hasWindowsRoot) {
             # Install user links first. A broader C:\ mapping must precede
