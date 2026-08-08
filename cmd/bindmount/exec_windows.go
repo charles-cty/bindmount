@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osExec "os/exec"
 	"path/filepath"
 	"syscall"
 
@@ -43,6 +44,8 @@ func cmdExec(args []string) error {
 	}
 	detach := false
 	rootDir := ""
+	resolveExecutableFlag := false
+	resolveExecutableSet := false
 	filteredArgs := make([]string, 0, len(ourArgs))
 	for i := 0; i < len(ourArgs); i++ {
 		switch ourArgs[i] {
@@ -54,6 +57,12 @@ func cmdExec(args []string) error {
 			}
 			rootDir = ourArgs[i+1]
 			i++
+		case "--resolve-executable":
+			resolveExecutableFlag = true
+			resolveExecutableSet = true
+		case "--no-resolve-executable":
+			resolveExecutableFlag = false
+			resolveExecutableSet = true
 		default:
 			filteredArgs = append(filteredArgs, ourArgs[i])
 		}
@@ -70,6 +79,16 @@ func cmdExec(args []string) error {
 	}
 	if len(cmdArgs) == 0 {
 		return errors.New("exec requires a command to run inside the silo")
+	}
+	if rootDir != "" && !resolveExecutableSet {
+		resolveExecutableFlag = true
+	}
+	executablePath := ""
+	if resolveExecutableFlag {
+		executablePath, err = resolveExecutable(cmdArgs[0])
+		if err != nil {
+			return fmt.Errorf("resolve executable %q: %w", cmdArgs[0], err)
+		}
 	}
 	if existing, openErr := winapi.OpenJob(jobName, winapi.JOB_OBJECT_ALL_ACCESS); openErr == nil {
 		syscall.CloseHandle(existing)
@@ -108,6 +127,11 @@ func cmdExec(args []string) error {
 			return err
 		}
 	}
+	if resolveExecutableFlag {
+		if err := createExecutableMapping(job, executablePath); err != nil {
+			return err
+		}
+	}
 
 	// Create any requested silo-scoped links before launching the process.
 	for _, l := range linkSpecs {
@@ -130,6 +154,26 @@ func cmdExec(args []string) error {
 	// error, so `bindmount exec` is transparent in scripts.
 	if !detach && exitCode != 0 {
 		exitWith(exitCode)
+	}
+	return nil
+}
+
+func resolveExecutable(command string) (string, error) {
+	path, err := osExec.LookPath(command)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(path), nil
+}
+
+func createExecutableMapping(job syscall.Handle, executablePath string) error {
+	virtualRoot := filepath.Dir(executablePath)
+	volume := filepath.VolumeName(virtualRoot)
+	if volume != "" && filepath.Clean(virtualRoot) == filepath.Clean(volume+string(filepath.Separator)) {
+		return nil
+	}
+	if err := bindfilter.CreateSilo(job, virtualRoot, virtualRoot, bindfilter.Options{}); err != nil {
+		return fmt.Errorf("create executable mapping %s -> %s: %w", virtualRoot, virtualRoot, err)
 	}
 	return nil
 }
