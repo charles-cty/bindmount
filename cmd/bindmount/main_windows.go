@@ -106,6 +106,12 @@ func newExecCommand() *cobra.Command {
 	// exec has a command payload after `--`; leave that payload untouched so
 	// Cobra does not try to interpret the child command's own flags.
 	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
+		for _, arg := range args {
+			if arg == "-h" || arg == "--help" {
+				fmt.Println("usage: bindmount exec [--detach] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]")
+				return nil
+			}
+		}
 		return cmdExec(args)
 	}}
 }

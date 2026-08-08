@@ -37,7 +37,7 @@ func cmdExec(args []string) error {
 	if cmdArgs == nil {
 		// No "--" separator: first arg is the job name, rest is the command.
 		if len(args) < 2 {
-			return errors.New("usage: bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]")
+			return errors.New("usage: bindmount exec [--detach] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]")
 		}
 		ourArgs = args[:1]
 		cmdArgs = args[1:]
