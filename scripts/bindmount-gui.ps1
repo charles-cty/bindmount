@@ -270,14 +270,14 @@ $execRoot.AutoSize = $true
 $execTab.Controls.Add($execRoot)
 $execRootDir = Add-TextBox $execTab 330 306 510
 $execRootDir.Text = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'bindmount\roots'
-$execResolve = New-Object Windows.Forms.CheckBox
-$execResolve.Text = 'Resolve and expose executable directory'
-$execResolve.Location = New-Object Drawing.Point(20, 335)
-$execResolve.AutoSize = $true
-$execTab.Controls.Add($execResolve)
+$execPassthrough = New-Object Windows.Forms.CheckBox
+$execPassthrough.Text = 'Passthrough executable directory'
+$execPassthrough.Location = New-Object Drawing.Point(20, 335)
+$execPassthrough.AutoSize = $true
+$execTab.Controls.Add($execPassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
-        $execResolve.Checked = $true
+        $execPassthrough.Checked = $true
     }
 })
 $execButton = Add-Button $execTab 'Create silo and run command' 20 365
@@ -291,10 +291,10 @@ $execButton.Add_Click({
             if (-not $execRootDir.Text) { throw 'Enter a root backing directory.' }
             $arguments += @('--root', $execRootDir.Text)
         }
-        if ($execResolve.Checked) {
-            $arguments += '--resolve-executable'
+        if ($execPassthrough.Checked) {
+            $arguments += @('--passthrough', 'executable')
         } elseif ($execRoot.Checked) {
-            $arguments += '--no-resolve-executable'
+            $arguments += @('--no-passthrough', 'executable')
         }
         $hasWindowsRoot = $false
         foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {

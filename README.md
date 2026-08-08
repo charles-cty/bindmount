@@ -75,17 +75,17 @@ bindmount add [--silo <job>] <virtual-root> <target>
 bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough executable|--no-passthrough executable] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
 
 `--root` creates a backing directory for every drive visible when the silo is
 created. It is a launch-time snapshot, not a drive hot-plug monitor. When
-`--root` is supplied, executable resolution is enabled by default so a command
+`--root` is supplied, executable passthrough is enabled by default so a command
 found through `PATH` (or supplied as an explicit executable path) has its
 containing directory exposed inside the silo. Override that default with
-`--no-resolve-executable`; use `--resolve-executable` to enable it explicitly
+`--no-passthrough executable`; use `--passthrough executable` to enable it explicitly
 without `--root`.
 
 The `exec` command requires `--` before the child command. Options before `--`

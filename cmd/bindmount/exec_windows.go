@@ -15,7 +15,7 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--resolve-executable|--no-resolve-executable] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough executable|--no-passthrough executable] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
 
 // cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 //
@@ -47,8 +47,8 @@ func cmdExec(args []string) error {
 	}
 	detach := false
 	rootDir := ""
-	resolveExecutableFlag := false
-	resolveExecutableSet := false
+	passthroughExecutableFlag := false
+	passthroughExecutableSet := false
 	verbose := false
 	filteredArgs := make([]string, 0, len(ourArgs))
 	for i := 0; i < len(ourArgs); i++ {
@@ -61,12 +61,16 @@ func cmdExec(args []string) error {
 			}
 			rootDir = ourArgs[i+1]
 			i++
-		case "--resolve-executable":
-			resolveExecutableFlag = true
-			resolveExecutableSet = true
-		case "--no-resolve-executable":
-			resolveExecutableFlag = false
-			resolveExecutableSet = true
+		case "--passthrough", "--no-passthrough":
+			if i+1 >= len(ourArgs) || ourArgs[i+1] != "executable" {
+				return fmt.Errorf("%s requires the passthrough name executable", ourArgs[i])
+			}
+			i++
+			passthroughExecutableFlag = true
+			if ourArgs[i-1] == "--no-passthrough" {
+				passthroughExecutableFlag = false
+			}
+			passthroughExecutableSet = true
 		case "--verbose":
 			verbose = true
 		default:
@@ -86,14 +90,14 @@ func cmdExec(args []string) error {
 	if len(cmdArgs) == 0 {
 		return errors.New("exec requires a command to run inside the silo")
 	}
-	if rootDir != "" && !resolveExecutableSet {
-		resolveExecutableFlag = true
+	if rootDir != "" && !passthroughExecutableSet {
+		passthroughExecutableFlag = true
 	}
 	executablePath := ""
-	if resolveExecutableFlag {
-		executablePath, err = resolveExecutable(cmdArgs[0])
+	if passthroughExecutableFlag {
+		executablePath, err = passthroughExecutable(cmdArgs[0])
 		if err != nil {
-			return fmt.Errorf("resolve executable %q: %w", cmdArgs[0], err)
+			return fmt.Errorf("locate executable for passthrough %q: %w", cmdArgs[0], err)
 		}
 	}
 	if existing, openErr := winapi.OpenJob(jobName, winapi.JOB_OBJECT_ALL_ACCESS); openErr == nil {
@@ -140,7 +144,7 @@ func cmdExec(args []string) error {
 			return err
 		}
 	}
-	if resolveExecutableFlag {
+	if passthroughExecutableFlag {
 		if err := createExecutableMapping(job, executablePath, verbose); err != nil {
 			return err
 		}
@@ -171,7 +175,7 @@ func cmdExec(args []string) error {
 	return nil
 }
 
-func resolveExecutable(command string) (string, error) {
+func passthroughExecutable(command string) (string, error) {
 	path, err := osExec.LookPath(command)
 	if err != nil {
 		return "", err
