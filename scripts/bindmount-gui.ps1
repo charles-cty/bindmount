@@ -275,12 +275,30 @@ $execPassthrough.Text = 'Passthrough executable directory'
 $execPassthrough.Location = New-Object Drawing.Point(20, 335)
 $execPassthrough.AutoSize = $true
 $execTab.Controls.Add($execPassthrough)
+$execPathPassthrough = New-Object Windows.Forms.CheckBox
+$execPathPassthrough.Text = 'Passthrough PATH directories'
+$execPathPassthrough.Location = New-Object Drawing.Point(20, 360)
+$execPathPassthrough.AutoSize = $true
+$execTab.Controls.Add($execPathPassthrough)
+$execCwdPassthrough = New-Object Windows.Forms.CheckBox
+$execCwdPassthrough.Text = 'Passthrough current directory'
+$execCwdPassthrough.Location = New-Object Drawing.Point(20, 385)
+$execCwdPassthrough.AutoSize = $true
+$execTab.Controls.Add($execCwdPassthrough)
+$execAppDataPassthrough = New-Object Windows.Forms.CheckBox
+$execAppDataPassthrough.Text = 'Passthrough APPDATA and LOCALAPPDATA'
+$execAppDataPassthrough.Location = New-Object Drawing.Point(20, 410)
+$execAppDataPassthrough.AutoSize = $true
+$execTab.Controls.Add($execAppDataPassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
         $execPassthrough.Checked = $true
+        $execPathPassthrough.Checked = $true
+        $execCwdPassthrough.Checked = $true
+        $execAppDataPassthrough.Checked = $true
     }
 })
-$execButton = Add-Button $execTab 'Create silo and run command' 20 365
+$execButton = Add-Button $execTab 'Create silo and run command' 20 445
 $execButton.Add_Click({
     Run-Action {
         if (-not $execName.Text -or -not $execCommand.Text) {
@@ -295,6 +313,17 @@ $execButton.Add_Click({
             $arguments += @('--passthrough', 'executable')
         } elseif ($execRoot.Checked) {
             $arguments += @('--no-passthrough', 'executable')
+        }
+        foreach ($option in @(
+            @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
+            @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
+            @{ Checked = $execAppDataPassthrough.Checked; Name = 'appdata' }
+        )) {
+            if ($option.Checked) {
+                $arguments += @('--passthrough', $option.Name)
+            } elseif ($execRoot.Checked) {
+                $arguments += @('--no-passthrough', $option.Name)
+            }
         }
         $hasWindowsRoot = $false
         foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {

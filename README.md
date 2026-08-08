@@ -75,18 +75,23 @@ bindmount add [--silo <job>] <virtual-root> <target>
 bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough executable|--no-passthrough executable] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
 
 `--root` creates a backing directory for every drive visible when the silo is
 created. It is a launch-time snapshot, not a drive hot-plug monitor. When
-`--root` is supplied, executable passthrough is enabled by default so a command
-found through `PATH` (or supplied as an explicit executable path) has its
-containing directory exposed inside the silo. Override that default with
-`--no-passthrough executable`; use `--passthrough executable` to enable it explicitly
-without `--root`.
+`--root` is supplied, four passthrough types are enabled by default:
+
+- `executable` — expose the executable's containing directory.
+- `path` — expose every existing directory listed in `PATH`.
+- `cwd` — expose the launcher's current working directory.
+- `appdata` — expose `APPDATA` and `LOCALAPPDATA`.
+
+Each passthrough is read-write and can be independently controlled with
+`--passthrough <name>` or `--no-passthrough <name>`. Without `--root`, all
+passthrough types are disabled unless explicitly enabled.
 
 The `exec` command requires `--` before the child command. Options before `--`
 belong to `bindmount`; everything after it is passed to the launched process.

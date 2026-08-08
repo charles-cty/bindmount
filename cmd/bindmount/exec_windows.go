@@ -15,7 +15,16 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough executable|--no-passthrough executable] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
+
+func validPassthroughName(name string) bool {
+	switch name {
+	case "executable", "path", "cwd", "appdata":
+		return true
+	default:
+		return false
+	}
+}
 
 // cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 //
@@ -47,8 +56,8 @@ func cmdExec(args []string) error {
 	}
 	detach := false
 	rootDir := ""
-	passthroughExecutableFlag := false
-	passthroughExecutableSet := false
+	passthrough := map[string]bool{}
+	passthroughSet := map[string]bool{}
 	verbose := false
 	filteredArgs := make([]string, 0, len(ourArgs))
 	for i := 0; i < len(ourArgs); i++ {
@@ -62,15 +71,13 @@ func cmdExec(args []string) error {
 			rootDir = ourArgs[i+1]
 			i++
 		case "--passthrough", "--no-passthrough":
-			if i+1 >= len(ourArgs) || ourArgs[i+1] != "executable" {
-				return fmt.Errorf("%s requires the passthrough name executable", ourArgs[i])
+			if i+1 >= len(ourArgs) || !validPassthroughName(ourArgs[i+1]) {
+				return fmt.Errorf("%s requires one of: executable, path, cwd, appdata", ourArgs[i])
 			}
+			name := ourArgs[i+1]
 			i++
-			passthroughExecutableFlag = true
-			if ourArgs[i-1] == "--no-passthrough" {
-				passthroughExecutableFlag = false
-			}
-			passthroughExecutableSet = true
+			passthrough[name] = ourArgs[i-1] == "--passthrough"
+			passthroughSet[name] = true
 		case "--verbose":
 			verbose = true
 		default:
@@ -90,11 +97,15 @@ func cmdExec(args []string) error {
 	if len(cmdArgs) == 0 {
 		return errors.New("exec requires a command to run inside the silo")
 	}
-	if rootDir != "" && !passthroughExecutableSet {
-		passthroughExecutableFlag = true
+	if rootDir != "" {
+		for _, name := range []string{"executable", "path", "cwd", "appdata"} {
+			if !passthroughSet[name] {
+				passthrough[name] = true
+			}
+		}
 	}
 	executablePath := ""
-	if passthroughExecutableFlag {
+	if passthrough["executable"] {
 		executablePath, err = passthroughExecutable(cmdArgs[0])
 		if err != nil {
 			return fmt.Errorf("locate executable for passthrough %q: %w", cmdArgs[0], err)
@@ -136,16 +147,29 @@ func cmdExec(args []string) error {
 		if err := createRootMappings(job, rootDir, verbose); err != nil {
 			return err
 		}
+	}
+	mappedPassthrough := make(map[string]bool)
+	if passthrough["path"] {
+		if err := createPathMappings(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+	}
+	if passthrough["cwd"] {
 		workingDir, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("get current working directory: %w", err)
 		}
-		if err := createWorkingDirectoryMapping(job, workingDir, verbose); err != nil {
+		if err := createWorkingDirectoryMapping(job, workingDir, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
-	if passthroughExecutableFlag {
-		if err := createExecutableMapping(job, executablePath, verbose); err != nil {
+	if passthrough["appdata"] {
+		if err := createAppDataMappings(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+	}
+	if passthrough["executable"] {
+		if err := createExecutableMapping(job, executablePath, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
@@ -183,19 +207,70 @@ func passthroughExecutable(command string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func createExecutableMapping(job syscall.Handle, executablePath string, verbose bool) error {
-	virtualRoot := filepath.Dir(executablePath)
-	volume := filepath.VolumeName(virtualRoot)
-	if volume != "" && filepath.Clean(virtualRoot) == filepath.Clean(volume+string(filepath.Separator)) {
+func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[string]bool, verbose bool) error {
+	path = filepath.Clean(path)
+	if path == "." || path == "" {
 		return nil
 	}
-	if err := bindfilter.CreateSilo(job, virtualRoot, virtualRoot, bindfilter.Options{}); err != nil {
-		return fmt.Errorf("create executable mapping %s -> %s: %w", virtualRoot, virtualRoot, err)
+	volume := filepath.VolumeName(path)
+	if volume != "" && path == filepath.Clean(volume+string(filepath.Separator)) {
+		return nil
+	}
+	key := strings.ToLower(path)
+	if mapped[key] {
+		return nil
+	}
+	if err := bindfilter.CreateSilo(job, path, path, bindfilter.Options{}); err != nil {
+		return fmt.Errorf("create %s passthrough %s -> %s: %w", name, path, path, err)
 	}
 	if verbose {
-		fmt.Printf("bindmount: mapping executable %s -> %s\n", virtualRoot, virtualRoot)
+		fmt.Printf("bindmount: passthrough %s %s -> %s\n", name, path, path)
+	}
+	mapped[key] = true
+	return nil
+}
+
+func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	seen := make(map[string]bool)
+	for _, entry := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+		path := filepath.Clean(strings.Trim(entry, `"`))
+		if path == "." || path == "" || seen[strings.ToLower(path)] {
+			continue
+		}
+		seen[strings.ToLower(path)] = true
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if err := createPassthroughMapping(job, "path", path, mapped, verbose); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func createAppDataMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	seen := make(map[string]bool)
+	for _, item := range []struct{ name, value string }{
+		{"appdata", os.Getenv("APPDATA")},
+		{"localappdata", os.Getenv("LOCALAPPDATA")},
+	} {
+		path := filepath.Clean(item.value)
+		key := strings.ToLower(path)
+		if path == "." || path == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := createPassthroughMapping(job, item.name, path, mapped, verbose); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createExecutableMapping(job syscall.Handle, executablePath string, mapped map[string]bool, verbose bool) error {
+	virtualRoot := filepath.Dir(executablePath)
+	return createPassthroughMapping(job, "executable", virtualRoot, mapped, verbose)
 }
 
 func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error {
@@ -225,19 +300,9 @@ func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error 
 // createWorkingDirectoryMapping restores the caller's current directory
 // after root mode shadows its drive with the portable backing tree. A drive
 // root needs no narrower mapping because it is already the root mapping.
-func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, verbose bool) error {
+func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, mapped map[string]bool, verbose bool) error {
 	workingDir = filepath.Clean(workingDir)
-	volume := filepath.VolumeName(workingDir)
-	if volume != "" && workingDir == filepath.Clean(volume+string(filepath.Separator)) {
-		return nil
-	}
-	if err := bindfilter.CreateSilo(job, workingDir, workingDir, bindfilter.Options{}); err != nil {
-		return fmt.Errorf("create working-directory mapping %s -> %s: %w", workingDir, workingDir, err)
-	}
-	if verbose {
-		fmt.Printf("bindmount: mapping working directory %s -> %s\n", workingDir, workingDir)
-	}
-	return nil
+	return createPassthroughMapping(job, "cwd", workingDir, mapped, verbose)
 }
 
 type linkSpec struct {
