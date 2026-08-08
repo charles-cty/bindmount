@@ -1,5 +1,8 @@
 # Windows-only build artifacts
 *.exe
+dist/
+release/
+bin/
 
 # Editor/OS noise
 .vscode/

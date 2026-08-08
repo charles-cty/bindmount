@@ -5,8 +5,10 @@ Bind Filter (`bindflt.sys`), as alternatives to Linux bind mounts and mount
 namespaces. It provides:
 
 - **`bindmount`** — a CLI for creating, removing, listing, and using bind links;
-- **`bindmount-gui`** — a minimal GUI helper that shows the current global
-  mappings (the CLI is the primary interface).
+- **`bindmount-gui.ps1`** — a PowerShell WinForms helper that shows the current global
+  mappings and exposes add/remove/silo-launch operations (the CLI remains the
+  primary interface). The silo-launch tab enables a read-write
+  `C:\Windows=C:\Windows` scoped link by default; clear that option to omit it.
 
 It is designed to be simple, stateless, and easy to use: no daemon, no
 persistent state file. The kernel is the source of truth; `bindmount list`
@@ -33,23 +35,35 @@ they are not a supported contract.
 - **Elevation** for `add`, `remove`, and `exec` (the driver enforces access;
   `list` works from a normal elevated or non-elevated context for the volume
   query on the tested build).
-- Go 1.22+ to build. No third-party dependencies (only the Go standard
-  library; the `syscall` package provides all Win32 bindings).
+- Go 1.22+ to build the CLI, and PowerShell 5.1+ with Windows Forms for the GUI.
+  The CLI uses Cobra/pflag for command-line parsing.
 
 ## Build
 
 The code is Windows-only (`GOOS=windows`). From WSL or any Go toolchain:
 
 ```sh
-make build            # writes bin/bindmount.exe and bin/bindmount-gui.exe
+make build            # regenerates dist/bindmount.exe and dist/bindmount-gui.ps1
+make release          # creates release/bindmount-windows-amd64.zip
 ```
 
 or directly:
 
 ```sh
-GOOS=windows GOARCH=amd64 go build -o bin/bindmount.exe ./cmd/bindmount
-GOOS=windows GOARCH=amd64 go build -o bin/bindmount-gui.exe ./cmd/bindmount-gui
+GOOS=windows GOARCH=amd64 go build -o dist/bindmount.exe ./cmd/bindmount
+cp scripts/bindmount-gui.ps1 dist/bindmount-gui.ps1
 ```
+
+Run the GUI from PowerShell:
+
+```powershell
+.\dist\bindmount-gui.ps1
+```
+
+The GUI uses `exec --detach` automatically. In detached mode, `bindmount.exe`
+creates the silo and launches the requested command, then exits; the command
+inherits the Job Object handle and therefore keeps the silo alive until the
+workload exits.
 
 Cross-compiling from Linux/WSL works because the project uses only the
 standard library (`syscall`), no cgo.
@@ -60,7 +74,9 @@ standard library (`syscall`), no cgo.
 bindmount add [--read-only] [--merged] [--silo <job>] <virtual-root> <target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+bindmount silo exists <job-name>
+bindmount silo kill <job-name>
 ```
 
 ### Global mappings
@@ -133,7 +149,9 @@ bindmount remove --silo mysilo C:\more
 
 ```text
 cmd/bindmount/          CLI (add/remove/list/exec)
-cmd/bindmount-gui/      GUI helper (mapping list in a message box)
+scripts/                PowerShell WinForms GUI source
+dist/                   Generated local Windows package
+release/                Generated release archives
 internal/bindfilter/    Wrapper: Options, scopes, grow-and-retry enumeration,
                         NT->DOS path conversion
 internal/winapi/        Low-level bindings: dynamic bindfltapi.dll resolution,
