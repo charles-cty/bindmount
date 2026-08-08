@@ -79,6 +79,17 @@ bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
 
+`--root` creates a backing directory for every drive visible when the silo is
+created. It is a launch-time snapshot, not a drive hot-plug monitor. When
+`--root` is supplied, executable resolution is enabled by default so a command
+found through `PATH` (or supplied as an explicit executable path) has its
+containing directory exposed inside the silo. Override that default with
+`--no-resolve-executable`; use `--resolve-executable` to enable it explicitly
+without `--root`.
+
+The `exec` command requires `--` before the child command. Options before `--`
+belong to `bindmount`; everything after it is passed to the launched process.
+
 ### Global mappings
 
 Global mappings are visible to every process on the host:
