@@ -1,0 +1,182 @@
+# bindmount
+
+`bindmount` manages Windows Bind Links (global or silo-scoped) through the
+Bind Filter (`bindflt.sys`), as alternatives to Linux bind mounts and mount
+namespaces. It provides:
+
+- **`bindmount`** — a CLI for creating, removing, listing, and using bind links;
+- **`bindmount-gui`** — a minimal GUI helper that shows the current global
+  mappings (the CLI is the primary interface).
+
+It is designed to be simple, stateless, and easy to use: no daemon, no
+persistent state file. The kernel is the source of truth; `bindmount list`
+reads live state from the filter.
+
+> **Research note:** [`docs/BindFilterAPI.md`](docs/BindFilterAPI.md) is an
+> evolving, project-wide research and implementation document. It may change
+> as Windows builds and experiments provide new evidence; it is not a static
+> source of truth or a supported Microsoft API contract. The implementation
+> validates all data returned by the undocumented interface and prefers the
+> public Bindlink API where practical.
+
+**WARNING**: This project uses several internal or undocumented Windows
+mechanisms and APIs. They are already used by Microsoft in its open-source
+projects (go-winio, hcsshim, mxc, ...), so they are relatively stable — but
+they are not a supported contract.
+
+## Requirements
+
+- Windows 10 20H1+ / Windows Server 2022+ (developed and smoke-tested on
+  Windows build 26100, `bindfltapi.dll` 10.0.26100.33158).
+- `bindflt.sys` loaded (`fltmc filters` shows `bindflt`, altitude 409800 on
+  the tested build). Windows loads it on demand.
+- **Elevation** for `add`, `remove`, and `exec` (the driver enforces access;
+  `list` works from a normal elevated or non-elevated context for the volume
+  query on the tested build).
+- Go 1.22+ to build. No third-party dependencies (only the Go standard
+  library; the `syscall` package provides all Win32 bindings).
+
+## Build
+
+The code is Windows-only (`GOOS=windows`). From WSL or any Go toolchain:
+
+```sh
+make build            # writes bin/bindmount.exe and bin/bindmount-gui.exe
+```
+
+or directly:
+
+```sh
+GOOS=windows GOARCH=amd64 go build -o bin/bindmount.exe ./cmd/bindmount
+GOOS=windows GOARCH=amd64 go build -o bin/bindmount-gui.exe ./cmd/bindmount-gui
+```
+
+Cross-compiling from Linux/WSL works because the project uses only the
+standard library (`syscall`), no cgo.
+
+## CLI usage
+
+```text
+bindmount add [--read-only] [--merged] [--silo <job>] <virtual-root> <target>
+bindmount remove [--silo <job>] <virtual-root>
+bindmount list [--silo <job>] [<volume-path>]
+bindmount exec [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+```
+
+### Global mappings
+
+Global mappings are visible to every process on the host:
+
+```powershell
+# Run elevated
+mkdir C:\virtual
+bindmount add C:\virtual C:\backing
+dir C:\virtual                      # shows C:\backing contents
+bindmount list C:\                  # lists the mapping
+bindmount remove C:\virtual         # removes it
+```
+
+Options:
+
+- `--read-only` — the mapping cannot be written through.
+- `--merged` — recursively merge the existing virtual-root directory with the
+  target; the target wins on name collisions. This is a merged namespace,
+  **not** an OverlayFS/CoW layer: writes and deletes act directly on the
+  backing tree, no copy-up or whiteouts. See
+  [docs/BindFilterAPI.md](docs/BindFilterAPI.md#observed-merged-bind-behavior).
+
+### Silo-scoped mappings
+
+A silo-scoped mapping is visible only to processes inside a job silo. The
+typical flow is `exec`, which creates the job, promotes it to a silo, creates
+the links, and launches a command inside:
+
+```powershell
+# Run elevated. Creates the silo, two links, and runs a shell inside.
+bindmount exec --link C:\app\data=D:\shared\data --link C:\app\cfg=D:\cfg-ro --read-only mysilo -- cmd.exe
+```
+
+Inside that `cmd.exe`, `C:\app\data` resolves to `D:\shared\data` and
+`C:\app\cfg` is a read-only view of `D:\cfg-ro`. Host processes see the
+ordinary filesystem at those paths. When the shell exits, the job is
+terminated and its silo-scoped mappings disappear with it.
+
+The other commands accept `--silo <job-name>` to operate on an existing
+job's mappings (the job must already be a silo):
+
+```powershell
+bindmount list --silo mysilo
+bindmount add --silo mysilo C:\more D:\more-backing
+bindmount remove --silo mysilo C:\more
+```
+
+> **Note on `exec`:** on the tested build (26100), `CreateProcess` with
+> `PROC_THREAD_ATTRIBUTE_JOB_LIST` fails with `ERROR_INVALID_PARAMETER` when
+> the attribute list references a silo job, so `exec` automatically falls back
+> to creating the process suspended and calling `AssignProcessToJobObject`.
+
+### Scope and lifetime semantics (from the research document)
+
+- A mapping must be removed with the same scope it was created with; a global
+  mapping and a silo mapping at the same path are different mappings.
+- Silo mappings are tied to the silo's lifetime — closing the last job handle
+  (with kill-on-close) destroys them. Global mappings persist until removed.
+- A second `add` for the same virtual root in the same scope fails with
+  `E_INVALIDARG` (tested on build 26100); repeated setup does **not** append
+  targets.
+- Existing handles and pre-existing hard links are **not** retargeted by a new
+  mapping; the filter is path-based, not object-identity-based.
+- Mappings below a nested silo do not inherit ancestor-silo mappings; the
+  lookup tiers are: global + caller-SID + innermost silo.
+
+## Architecture
+
+```text
+cmd/bindmount/          CLI (add/remove/list/exec)
+cmd/bindmount-gui/      GUI helper (mapping list in a message box)
+internal/bindfilter/    Wrapper: Options, scopes, grow-and-retry enumeration,
+                        NT->DOS path conversion
+internal/winapi/        Low-level bindings: dynamic bindfltapi.dll resolution,
+                        checked BfGetMappings response parser, job-object and
+                        process-attribute-list helpers
+docs/BindFilterAPI.md   Research document: ABI, flags, observed behavior
+```
+
+Design decisions worth knowing:
+
+- **Dynamic resolution.** `bindfltapi.dll` is loaded with an explicit
+  `%SystemRoot%\System32` path and `GetProcAddress` (no import library
+  exists). Missing DLL/exports produce `ErrBindfltUnavailable`.
+- **Defensive parsing.** Every offset/length in the `BfGetMappings` response
+  is bounds-checked before dereference, per the validation checklist in the
+  research document; a nonzero filter status is surfaced as an error.
+- **Enumeration with retry.** `BfGetMappings` starts at 64 KB and grows up to
+  4x when the filter reports insufficient buffer (go-winio uses a fixed
+  256 KB; the document recommends a resize strategy instead).
+- **Path conversion.** Targets come back as NT device paths
+  (`\Device\HarddiskVolumeN\...`); they're converted via
+  `\\.\GLOBALROOT` + `GetFinalPathNameByHandle`, as go-winio does. A target
+  that fails conversion is printed raw rather than dropped.
+- **No state file.** The tool is stateless; the filter is queried live. This
+  means `bindmount` cannot list silo mappings without the silo's job name —
+  that is a limitation of the interface itself (documented in the research:
+  no call enumerates "all silos").
+
+## Testing
+
+Unit tests cover the offline-checkable parts: the response parser (including
+truncated/corrupt buffers) and option validation. On Windows:
+
+```powershell
+go test ./...
+```
+
+From WSL, `make test` cross-compiles the test binaries without executing them.
+
+End-to-end behavior (actually creating mappings) requires an elevated Windows
+host with `bindflt` loaded; see docs/BindFilterAPI.md for the environment the
+ABI details were verified against.
+
+## License
+
+TBD

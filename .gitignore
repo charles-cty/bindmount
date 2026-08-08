@@ -1,0 +1,9 @@
+# Windows-only build artifacts
+*.exe
+
+# Editor/OS noise
+.vscode/
+.idea/
+Thumbs.db
+
+# The GUI helper is a separate module; its binaries are ignored by the *.exe rule.
