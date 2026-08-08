@@ -5,13 +5,15 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 
 	"bindmount/internal/bindfilter"
 	"bindmount/internal/winapi"
 )
 
-// cmdExec implements: bindmount exec [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
+// cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]]... <job-name> -- <command> [args...]
 //
 // It creates a job object, promotes it to a silo, optionally creates
 // silo-scoped bind links, spawns the command inside the silo via
@@ -34,11 +36,29 @@ func cmdExec(args []string) error {
 	if cmdArgs == nil {
 		// No "--" separator: first arg is the job name, rest is the command.
 		if len(args) < 2 {
-			return errors.New("usage: bindmount exec [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]")
+			return errors.New("usage: bindmount exec [--detach] [--root data-dir] [--link root=target [--read-only] [--merged]] <job-name> -- <command> [args...]")
 		}
 		ourArgs = args[:1]
 		cmdArgs = args[1:]
 	}
+	detach := false
+	rootDir := ""
+	filteredArgs := make([]string, 0, len(ourArgs))
+	for i := 0; i < len(ourArgs); i++ {
+		switch ourArgs[i] {
+		case "--detach":
+			detach = true
+		case "--root":
+			if i+1 >= len(ourArgs) {
+				return errors.New("--root requires a data directory")
+			}
+			rootDir = ourArgs[i+1]
+			i++
+		default:
+			filteredArgs = append(filteredArgs, ourArgs[i])
+		}
+	}
+	ourArgs = filteredArgs
 	if len(ourArgs) < 1 {
 		return errors.New("exec requires a job name")
 	}
@@ -51,18 +71,42 @@ func cmdExec(args []string) error {
 	if len(cmdArgs) == 0 {
 		return errors.New("exec requires a command to run inside the silo")
 	}
+	if existing, openErr := winapi.OpenJob(jobName, winapi.JOB_OBJECT_ALL_ACCESS); openErr == nil {
+		syscall.CloseHandle(existing)
+		return fmt.Errorf("silo %q already exists", jobName)
+	} else if !errors.Is(openErr, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(openErr, syscall.ERROR_PATH_NOT_FOUND) {
+		return fmt.Errorf("check silo %q: %w", jobName, openErr)
+	}
 
 	job, err := winapi.CreateJob(jobName)
 	if err != nil {
 		return fmt.Errorf("create job %q: %w", jobName, err)
 	}
 	defer syscall.CloseHandle(job)
+	if detach {
+		if err := winapi.MakeHandleInheritable(job); err != nil {
+			return fmt.Errorf("prepare detached silo handle: %w", err)
+		}
+	}
 
-	if err := winapi.SetKillOnJobClose(job); err != nil {
+	// Job limits:
+	//  - KILL_ON_JOB_CLOSE tears the whole silo down when exec exits, so the
+	//    command cannot outlive the tool.
+	//  - Both breakaway limits are deliberately absent: without
+	//    JOB_OBJECT_LIMIT_BREAKAWAY_OK, a child created with
+	//    CREATE_BREAKAWAY_FROM_JOB is denied breakaway, so the process tree
+	//    cannot escape the silo (and its bind-link view). SILENT_BREAKAWAY_OK
+	//    is also excluded by SetJobLimitFlags.
+	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
 		return fmt.Errorf("configure job: %w", err)
 	}
 	if err := winapi.PromoteToSilo(job); err != nil {
 		return fmt.Errorf("promote job to silo: %w", err)
+	}
+	if rootDir != "" {
+		if err := createRootMappings(job, rootDir); err != nil {
+			return err
+		}
 	}
 
 	// Create any requested silo-scoped links before launching the process.
@@ -72,20 +116,41 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	exitCode, err := runInSilo(job, cmdArgs)
+	exitCode, err := runInSilo(job, cmdArgs, detach)
 	if err != nil {
 		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
 		// on build 26100 with ERROR_INVALID_PARAMETER for a silo job), fall
 		// back to creating the process suspended and assigning it to the job.
-		exitCode, err = runInSiloFallback(job, cmdArgs)
+		exitCode, err = runInSiloFallback(job, cmdArgs, detach)
 		if err != nil {
 			return err
 		}
 	}
 	// Propagate the child's exit code directly rather than wrapping it as an
 	// error, so `bindmount exec` is transparent in scripts.
-	if exitCode != 0 {
+	if !detach && exitCode != 0 {
 		exitWith(exitCode)
+	}
+	return nil
+}
+
+func createRootMappings(job syscall.Handle, dataDir string) error {
+	if dataDir == "" {
+		return errors.New("root data directory is required")
+	}
+	drives, err := winapi.LogicalDriveLetters()
+	if err != nil {
+		return fmt.Errorf("enumerate drives for root mappings: %w", err)
+	}
+	for _, letter := range drives {
+		root := fmt.Sprintf("%c:\\", letter)
+		target := filepath.Join(dataDir, string(letter))
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return fmt.Errorf("create root backing %s: %w", target, err)
+		}
+		if err := bindfilter.CreateSilo(job, root, target, bindfilter.Options{}); err != nil {
+			return fmt.Errorf("create root mapping %s -> %s: %w", root, target, err)
+		}
 	}
 	return nil
 }
@@ -143,6 +208,8 @@ func createSiloLink(job syscall.Handle, l linkSpec) error {
 	if err != nil {
 		return fmt.Errorf("create silo link %s -> %s: %w", l.root, l.target, err)
 	}
-	fmt.Printf("created silo mapping %s -> %s\n", l.root, l.target)
+	// Mapping setup is intentionally quiet for exec: the launched command is
+	// the user-facing process, and its console should not be prefixed by
+	// supervisor diagnostics.
 	return nil
 }

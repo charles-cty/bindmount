@@ -12,9 +12,29 @@ import (
 	"bindmount/internal/winapi"
 )
 
+const startfUseStdHandles = 0x00000100
+
+func inheritStandardHandles(si *syscall.StartupInfo) {
+	in, inErr := syscall.GetStdHandle(-10) // STD_INPUT_HANDLE
+	out, outErr := syscall.GetStdHandle(-11)
+	errHandle, errErr := syscall.GetStdHandle(-12)
+	if inErr == nil && outErr == nil && errErr == nil && in != 0 && out != 0 && errHandle != 0 {
+		si.StdInput = in
+		si.StdOutput = out
+		si.StdErr = errHandle
+		si.Flags |= startfUseStdHandles
+	}
+}
+
 // runInSilo launches cmdArgs[0] inside the silo job using
 // PROC_THREAD_ATTRIBUTE_JOB_LIST, waits for it, and returns its exit code.
-func runInSilo(job syscall.Handle, cmdArgs []string) (uint32, error) {
+//
+// On build 26100 this fails with ERROR_INVALID_PARAMETER when the attribute
+// references a silo job (hcsshim hits the same wall for job containers and
+// uses the same suspended-create + assign fallback as runInSiloFallback
+// below). The attribute path is tried first because it avoids the
+// create-then-assign window entirely.
+func runInSilo(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error) {
 	// Build the command line. CreateProcess requires a mutable buffer; the
 	// quoting rule follows the CRT/CommandLineToArgvW convention.
 	cmdLine := buildCommandLine(cmdArgs)
@@ -44,6 +64,7 @@ func runInSilo(job syscall.Handle, cmdArgs []string) (uint32, error) {
 	var si winapi.StartupInfoEx
 	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
 	si.AttributeList = attrList
+	inheritStandardHandles(&si.StartupInfo)
 
 	cmdPtr, err := syscall.UTF16PtrFromString(cmdLine)
 	if err != nil {
@@ -56,7 +77,7 @@ func runInSilo(job syscall.Handle, cmdArgs []string) (uint32, error) {
 		cmdPtr,
 		nil,
 		nil,
-		false,
+		true,
 		winapi.EXTENDED_STARTUPINFO_PRESENT,
 		nil,
 		nil,
@@ -69,6 +90,10 @@ func runInSilo(job syscall.Handle, cmdArgs []string) (uint32, error) {
 	defer syscall.CloseHandle(pi.Thread)
 	defer syscall.CloseHandle(pi.Process)
 
+	if detach {
+		return 0, nil
+	}
+
 	// The child inherits our console and stdio handles; no redirection is
 	// wired up, which is what a bind-mount helper wants: run the command as
 	// if the caller had launched it, just inside the silo.
@@ -80,6 +105,79 @@ func runInSilo(job syscall.Handle, cmdArgs []string) (uint32, error) {
 		return 0, fmt.Errorf("GetExitCodeProcess: %w", err)
 	}
 	return exitCode, nil
+}
+
+// runInSiloFallback creates the process suspended, assigns it to the job with
+// AssignProcessToJobObject, then resumes it. The suspended window matters:
+// the process is assigned before its initial thread runs a single
+// instruction, so it never observes the host filesystem view.
+func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error) {
+	cmdLine := buildCommandLine(cmdArgs)
+	cmdPtr, err := syscall.UTF16PtrFromString(cmdLine)
+	if err != nil {
+		return 0, err
+	}
+
+	var si syscall.StartupInfo
+	si.Cb = uint32(unsafe.Sizeof(si))
+	inheritStandardHandles(&si)
+	var pi syscall.ProcessInformation
+	err = syscall.CreateProcess(
+		nil,
+		cmdPtr,
+		nil,
+		nil,
+		true,
+		winapi.CREATE_SUSPENDED,
+		nil,
+		nil,
+		&si,
+		&pi,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("CreateProcess suspended (%q): %w", cmdLine, err)
+	}
+
+	if err := winapi.AssignProcessToJob(job, pi.Process); err != nil {
+		syscall.TerminateProcess(pi.Process, 1)
+		syscall.CloseHandle(pi.Thread)
+		syscall.CloseHandle(pi.Process)
+		return 0, fmt.Errorf("assign process to job: %w", err)
+	}
+
+	if _, err := resumeThread(pi.Thread); err != nil {
+		syscall.TerminateProcess(pi.Process, 1)
+		syscall.CloseHandle(pi.Thread)
+		syscall.CloseHandle(pi.Process)
+		return 0, fmt.Errorf("resume process: %w", err)
+	}
+
+	defer syscall.CloseHandle(pi.Thread)
+	defer syscall.CloseHandle(pi.Process)
+	if detach {
+		return 0, nil
+	}
+
+	syscall.WaitForSingleObject(pi.Process, syscall.INFINITE)
+
+	var exitCode uint32
+	if err := syscall.GetExitCodeProcess(pi.Process, &exitCode); err != nil {
+		return 0, fmt.Errorf("GetExitCodeProcess: %w", err)
+	}
+	return exitCode, nil
+}
+
+var procResumeThread = syscall.NewLazyDLL("kernel32.dll").NewProc("ResumeThread")
+
+func resumeThread(thread syscall.Handle) (uint32, error) {
+	r, _, err := procResumeThread.Call(uintptr(thread))
+	if r == 0xFFFFFFFF {
+		if err != syscall.Errno(0) {
+			return 0, err
+		}
+		return 0, errors.New("ResumeThread failed")
+	}
+	return uint32(r), nil
 }
 
 // buildCommandLine quotes arguments per CommandLineToArgvW rules.
@@ -123,74 +221,4 @@ func quoteArg(s string) string {
 	}
 	b.WriteByte('"')
 	return b.String()
-}
-
-// runInSiloFallback creates the process suspended, assigns it to the job with
-// AssignProcessToJobObject, then resumes it. Used when
-// PROC_THREAD_ATTRIBUTE_JOB_LIST fails — observed on build 26100 where
-// CreateProcess returns ERROR_INVALID_PARAMETER for an attribute list that
-// references a silo job.
-func runInSiloFallback(job syscall.Handle, cmdArgs []string) (uint32, error) {
-	cmdLine := buildCommandLine(cmdArgs)
-	cmdPtr, err := syscall.UTF16PtrFromString(cmdLine)
-	if err != nil {
-		return 0, err
-	}
-
-	var si syscall.StartupInfo
-	si.Cb = uint32(unsafe.Sizeof(si))
-	var pi syscall.ProcessInformation
-	err = syscall.CreateProcess(
-		nil,
-		cmdPtr,
-		nil,
-		nil,
-		false,
-		winapi.CREATE_SUSPENDED,
-		nil,
-		nil,
-		&si,
-		&pi,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("CreateProcess suspended (%q): %w", cmdLine, err)
-	}
-
-	if err := winapi.AssignProcessToJob(job, pi.Process); err != nil {
-		syscall.TerminateProcess(pi.Process, 1)
-		syscall.CloseHandle(pi.Thread)
-		syscall.CloseHandle(pi.Process)
-		return 0, fmt.Errorf("assign process to job: %w", err)
-	}
-
-	if _, err := resumeThread(pi.Thread); err != nil {
-		syscall.TerminateProcess(pi.Process, 1)
-		syscall.CloseHandle(pi.Thread)
-		syscall.CloseHandle(pi.Process)
-		return 0, fmt.Errorf("resume process: %w", err)
-	}
-
-	defer syscall.CloseHandle(pi.Thread)
-	defer syscall.CloseHandle(pi.Process)
-
-	syscall.WaitForSingleObject(pi.Process, syscall.INFINITE)
-
-	var exitCode uint32
-	if err := syscall.GetExitCodeProcess(pi.Process, &exitCode); err != nil {
-		return 0, fmt.Errorf("GetExitCodeProcess: %w", err)
-	}
-	return exitCode, nil
-}
-
-var procResumeThread = syscall.NewLazyDLL("kernel32.dll").NewProc("ResumeThread")
-
-func resumeThread(thread syscall.Handle) (uint32, error) {
-	r, _, err := procResumeThread.Call(uintptr(thread))
-	if r == 0xFFFFFFFF {
-		if err != syscall.Errno(0) {
-			return 0, err
-		}
-		return 0, errors.New("ResumeThread failed")
-	}
-	return uint32(r), nil
 }

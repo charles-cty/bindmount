@@ -33,6 +33,8 @@ func ParseMappingsChecked(buf []byte, size uint32) ([]Mapping, error) { return n
 // syscall.Handle which has the same representation.
 type Handle = uintptr
 
+func LogicalDriveLetters() ([]rune, error) { return nil, errENOSYS }
+
 func CreateJob(name string) (Handle, error)              { return 0, errENOSYS }
 func OpenJob(name string, access uint32) (Handle, error) { return 0, errENOSYS }
 func SetKillOnJobClose(job Handle) error                 { return errENOSYS }

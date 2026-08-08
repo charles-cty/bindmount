@@ -32,6 +32,8 @@ const (
 // Job object access rights (public Win32 constants).
 const (
 	JOB_OBJECT_ALL_ACCESS = 0x1F001F
+	JOB_OBJECT_QUERY      = 0x0400
+	JOB_OBJECT_TERMINATE  = 0x0008
 )
 
 // Handle is the job/process handle type used across this package. On Windows
@@ -41,4 +43,14 @@ type Handle = syscall.Handle
 // Process creation flags not exported by the syscall package.
 const (
 	CREATE_SUSPENDED = 0x00000004
+)
+
+// Breakaway-related JOBOBJECT_EXTENDED_LIMIT_INFORMATION.LimitFlags. These
+// must remain clear for a silo whose process tree is not allowed to escape.
+// CREATE_BREAKAWAY_FROM_JOB is rejected unless the containing job opts in via
+// JOB_OBJECT_LIMIT_BREAKAWAY_OK. SILENT_BREAKAWAY_OK permits an implicit
+// breakaway and is therefore equally unsafe here.
+const (
+	JOB_OBJECT_LIMIT_BREAKAWAY_OK        = 0x00000800
+	JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x00001000
 )

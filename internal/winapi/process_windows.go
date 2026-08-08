@@ -33,6 +33,26 @@ var (
 	procDeleteProcThreadAttributeList     = modkernel32.NewProc("DeleteProcThreadAttributeList")
 )
 
+var procGetLogicalDrives = modkernel32.NewProc("GetLogicalDrives")
+
+// LogicalDriveLetters returns drive letters currently visible to the caller.
+func LogicalDriveLetters() ([]rune, error) {
+	mask, _, callErr := procGetLogicalDrives.Call()
+	if mask == 0 {
+		if callErr != syscall.Errno(0) {
+			return nil, callErr
+		}
+		return nil, syscall.EINVAL
+	}
+	letters := make([]rune, 0, 26)
+	for i := 0; i < 26; i++ {
+		if mask&(uintptr(1)<<i) != 0 {
+			letters = append(letters, rune('A'+i))
+		}
+	}
+	return letters, nil
+}
+
 // ProcThreadAttributeList is an opaque pointer to a caller-owned buffer.
 type ProcThreadAttributeList []byte
 

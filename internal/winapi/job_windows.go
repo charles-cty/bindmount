@@ -25,6 +25,12 @@ var (
 	procOpenJobObjectW           = modkernel32.NewProc("OpenJobObjectW")
 	procSetInformationJobObject  = modkernel32.NewProc("SetInformationJobObject")
 	procAssignProcessToJobObject = modkernel32.NewProc("AssignProcessToJobObject")
+	procSetHandleInformation     = modkernel32.NewProc("SetHandleInformation")
+	procTerminateJobObject       = modkernel32.NewProc("TerminateJobObject")
+)
+
+const (
+	handleFlagInherit = 0x00000001
 )
 
 // JOBOBJECT_BASIC_LIMIT_INFORMATION + IO counters, matching the public SDK
@@ -102,11 +108,18 @@ func OpenJob(name string, desiredAccess uint32) (Handle, error) {
 	return Handle(h), nil
 }
 
-// SetKillOnJobClose configures the job to terminate its processes when the
-// last handle is closed.
-func SetKillOnJobClose(job Handle) error {
+// SetJobLimitFlags sets the given JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+// LimitFlags on the job, replacing the current flag word. Callers combine
+// JOB_OBJECT_LIMIT_* constants.
+func SetJobLimitFlags(job Handle, flags uint32) error {
+	// A silo must not permit either explicit (CREATE_BREAKAWAY_FROM_JOB) or
+	// silent breakaway. Keep this invariant at the Win32 wrapper boundary so a
+	// future caller cannot accidentally turn a silo into an escapable job.
+	if flags&(JOB_OBJECT_LIMIT_BREAKAWAY_OK|JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) != 0 {
+		return fmt.Errorf("breakaway job limits are not permitted for silos")
+	}
 	var info jobobjectExtendedLimitInformation
-	info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	info.BasicLimitInformation.LimitFlags = flags
 	r, _, callErr := procSetInformationJobObject.Call(
 		uintptr(job),
 		uintptr(JobObjectExtendedLimitInformation),
@@ -120,6 +133,12 @@ func SetKillOnJobClose(job Handle) error {
 		return fmt.Errorf("SetInformationJobObject(ExtendedLimitInformation) failed")
 	}
 	return nil
+}
+
+// SetKillOnJobClose configures the job to terminate its processes when the
+// last handle is closed.
+func SetKillOnJobClose(job Handle) error {
+	return SetJobLimitFlags(job, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
 }
 
 // PromoteToSilo promotes an empty job object to a silo. The job must not
@@ -148,6 +167,34 @@ func AssignProcessToJob(job, process Handle) error {
 			return callErr
 		}
 		return fmt.Errorf("AssignProcessToJobObject failed")
+	}
+	return nil
+}
+
+// MakeHandleInheritable allows a detached child to keep the Job Object alive
+// after bindmount exits. The child and its descendants inherit the handle;
+// when the workload ends, the last handle closes and KILL_ON_JOB_CLOSE tears
+// down the silo.
+func MakeHandleInheritable(handle Handle) error {
+	r, _, callErr := procSetHandleInformation.Call(
+		uintptr(handle), handleFlagInherit, handleFlagInherit)
+	if r == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return fmt.Errorf("SetHandleInformation failed")
+	}
+	return nil
+}
+
+// TerminateJob terminates every process currently assigned to the job.
+func TerminateJob(job Handle, exitCode uint32) error {
+	r, _, callErr := procTerminateJobObject.Call(uintptr(job), uintptr(exitCode))
+	if r == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return fmt.Errorf("TerminateJobObject failed")
 	}
 	return nil
 }

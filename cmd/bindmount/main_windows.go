@@ -4,10 +4,11 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"syscall"
+
+	"github.com/spf13/cobra"
 
 	"bindmount/internal/bindfilter"
 	"bindmount/internal/winapi"
@@ -49,40 +50,69 @@ func usage(exitCode int) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage(2)
-	}
-
-	var err error
-	switch os.Args[1] {
-	case "add":
-		err = cmdAdd(os.Args[2:])
-	case "remove":
-		err = cmdRemove(os.Args[2:])
-	case "list":
-		err = cmdList(os.Args[2:])
-	case "exec":
-		err = cmdExec(os.Args[2:])
-	case "-h", "--help", "help":
-		usage(0)
-	default:
-		fmt.Fprintf(os.Stderr, "bindmount: unknown command %q\n\n", os.Args[1])
-		usage(2)
-	}
-
-	if err != nil {
+	if err := newRootCommand().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "bindmount: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+func newRootCommand() *cobra.Command {
+	root := &cobra.Command{Use: "bindmount", SilenceUsage: true}
+	root.AddCommand(newAddCommand(), newRemoveCommand(), newListCommand(), newExecCommand())
+	root.AddCommand(newSiloCommand())
+	return root
+}
+
+func newSiloCommand() *cobra.Command {
+	silo := &cobra.Command{Use: "silo", Short: "inspect or terminate named Job Silos"}
+	silo.AddCommand(&cobra.Command{
+		Use: "exists <name>", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			// Named Job Objects created by the CLI use the creator's default
+			// security descriptor; request the same access used by mapping/list
+			// operations so existence checks work for those jobs.
+			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_ALL_ACCESS)
+			if err != nil {
+				if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+					fmt.Printf("bindmount: silo %q does not exist\n", args[0])
+					return nil
+				}
+				return fmt.Errorf("check silo %q: %w", args[0], err)
+			}
+			syscall.CloseHandle(job)
+			fmt.Printf("bindmount: silo %q exists\n", args[0])
+			return nil
+		},
+	})
+	silo.AddCommand(&cobra.Command{
+		Use: "kill <name>", Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_TERMINATE)
+			if err != nil {
+				return fmt.Errorf("open silo %q: %w", args[0], err)
+			}
+			defer syscall.CloseHandle(job)
+			if err := winapi.TerminateJob(job, 1); err != nil {
+				return fmt.Errorf("kill silo %q: %w", args[0], err)
+			}
+			fmt.Printf("bindmount: terminated silo %q\n", args[0])
+			return nil
+		},
+	})
+	return silo
+}
+
+func newExecCommand() *cobra.Command {
+	// exec has a command payload after `--`; leave that payload untouched so
+	// Cobra does not try to interpret the child command's own flags.
+	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
+		return cmdExec(args)
+	}}
+}
+
 // scopeFlags holds the --silo handling shared by add/remove/list.
 type siloScope struct {
 	name string // empty = global
-}
-
-func (s *siloScope) register(fs *flag.FlagSet) {
-	fs.StringVar(&s.name, "silo", "", "scope the operation to the named silo job")
 }
 
 // open resolves the scope to a job handle (0 for global). The returned close
@@ -98,30 +128,27 @@ func (s *siloScope) open() (job winapi.Handle, closeFn func(), err error) {
 	return h, func() { syscall.CloseHandle(syscall.Handle(h)) }, nil
 }
 
-func cmdAdd(args []string) error {
-	fs := flag.NewFlagSet("add", flag.ExitOnError)
-	readOnly := fs.Bool("read-only", false, "create a read-only mapping")
-	merged := fs.Bool("merged", false, "merge the virtual root with the target")
-	var scope siloScope
-	scope.register(fs)
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: bindmount add [--read-only] [--merged] [--silo <job-name>] <virtual-root> <target>")
-	}
-	fs.Parse(args)
+func newAddCommand() *cobra.Command {
+	var readOnly, merged bool
+	var silo string
+	cmd := &cobra.Command{Use: "add <virtual-root> <target>", Args: cobra.ExactArgs(2), RunE: func(_ *cobra.Command, args []string) error {
+		return addMapping(args[0], args[1], readOnly, merged, silo)
+	}}
+	cmd.Flags().BoolVar(&readOnly, "read-only", false, "create a read-only mapping")
+	cmd.Flags().BoolVar(&merged, "merged", false, "merge the virtual root with the target")
+	cmd.Flags().StringVar(&silo, "silo", "", "scope the mapping to a silo job")
+	return cmd
+}
 
-	if fs.NArg() != 2 {
-		fs.Usage()
-		return errors.New("add requires exactly two path arguments")
-	}
-	virtualRoot, target := fs.Arg(0), fs.Arg(1)
-
+func addMapping(virtualRoot, target string, readOnly, merged bool, silo string) error {
+	scope := siloScope{name: silo}
 	job, closeJob, err := scope.open()
 	if err != nil {
 		return err
 	}
 	defer closeJob()
 
-	opts := bindfilter.Options{ReadOnly: *readOnly, Merged: *merged}
+	opts := bindfilter.Options{ReadOnly: readOnly, Merged: merged}
 	if scope.name == "" {
 		err = bindfilter.CreateGlobal(virtualRoot, target, opts)
 	} else {
@@ -135,25 +162,19 @@ func cmdAdd(args []string) error {
 	if scope.name != "" {
 		kind = "silo " + scope.name
 	}
-	fmt.Printf("created %s mapping %s -> %s\n", kind, virtualRoot, target)
+	fmt.Printf("bindmount: created %s mapping %s -> %s\n", kind, virtualRoot, target)
 	return nil
 }
 
-func cmdRemove(args []string) error {
-	fs := flag.NewFlagSet("remove", flag.ExitOnError)
-	var scope siloScope
-	scope.register(fs)
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: bindmount remove [--silo <job-name>] <virtual-root>")
-	}
-	fs.Parse(args)
+func newRemoveCommand() *cobra.Command {
+	var silo string
+	cmd := &cobra.Command{Use: "remove <virtual-root>", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error { return removeMapping(args[0], silo) }}
+	cmd.Flags().StringVar(&silo, "silo", "", "scope the removal to a silo job")
+	return cmd
+}
 
-	if fs.NArg() != 1 {
-		fs.Usage()
-		return errors.New("remove requires exactly one path argument")
-	}
-	virtualRoot := fs.Arg(0)
-
+func removeMapping(virtualRoot, silo string) error {
+	scope := siloScope{name: silo}
 	job, closeJob, err := scope.open()
 	if err != nil {
 		return err
@@ -173,26 +194,28 @@ func cmdRemove(args []string) error {
 	if scope.name != "" {
 		kind = "silo " + scope.name
 	}
-	fmt.Printf("removed %s mapping %s\n", kind, virtualRoot)
+	fmt.Printf("bindmount: removed %s mapping %s\n", kind, virtualRoot)
 	return nil
 }
 
-func cmdList(args []string) error {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
-	var scope siloScope
-	scope.register(fs)
-	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: bindmount list [--silo <job-name>] [<volume-path>]")
-	}
-	fs.Parse(args)
+func newListCommand() *cobra.Command {
+	var silo string
+	cmd := &cobra.Command{Use: "list [volume-path]", Args: cobra.MaximumNArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		volume := `C:\`
+		if len(args) == 1 {
+			volume = args[0]
+		}
+		return listMappings(volume, silo)
+	}}
+	cmd.Flags().StringVar(&silo, "silo", "", "list mappings in a silo job")
+	return cmd
+}
 
+func listMappings(volume, silo string) error {
+	scope := siloScope{name: silo}
 	var mappings []bindfilter.Mapping
 	var err error
 	if scope.name == "" {
-		volume := `C:\`
-		if fs.NArg() > 0 {
-			volume = fs.Arg(0)
-		}
 		mappings, err = bindfilter.ListVolume(volume)
 	} else {
 		var job winapi.Handle
@@ -209,11 +232,11 @@ func cmdList(args []string) error {
 	}
 
 	if len(mappings) == 0 {
-		fmt.Println("no mappings")
+		fmt.Println("bindmount: no mappings")
 		return nil
 	}
 	for _, m := range mappings {
-		fmt.Printf("%s\n  flags: 0x%08X\n", m.VirtualRoot, m.Flags)
+		fmt.Printf("bindmount: %s\n  flags: 0x%08X\n", m.VirtualRoot, m.Flags)
 		for _, t := range m.Targets {
 			fmt.Printf("  -> %s\n", t)
 		}
