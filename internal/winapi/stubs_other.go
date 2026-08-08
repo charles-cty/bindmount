@@ -23,6 +23,9 @@ type Mapping struct {
 // NTPathToDOS stub.
 func NTPathToDOS(p string) (string, error) { return p, nil }
 
+// NTVirtualRootToDOS stub.
+func NTVirtualRootToDOS(p string) string { return p }
+
 // ParseMappingsChecked stub.
 func ParseMappingsChecked(buf []byte, size uint32) ([]Mapping, error) { return nil, nil }
 

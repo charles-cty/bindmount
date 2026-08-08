@@ -127,10 +127,17 @@ func getMappings(flags uint32, job winapi.Handle, rootPath string) ([]winapi.Map
 	return nil, fmt.Errorf("BfGetMappings still reports insufficient buffer after growing to %d bytes", size)
 }
 
-// convertTargets converts NT device target paths to DOS paths where possible.
+// convertTargets converts NT device paths to DOS paths where possible.
+// Virtual roots use prefix substitution (no file open, so no traversal of
+// the mapping itself); targets use GLOBALROOT + GetFinalPathNameByHandle,
+// matching go-winio.
 func convertTargets(in []winapi.Mapping) []Mapping {
 	out := make([]Mapping, 0, len(in))
 	for _, m := range in {
+		virt := m.VirtualRoot
+		if strings.HasPrefix(virt, `\Device\`) {
+			virt = winapi.NTVirtualRootToDOS(virt)
+		}
 		targets := make([]string, 0, len(m.Targets))
 		for _, t := range m.Targets {
 			if strings.HasPrefix(t, `\Device\`) {
@@ -140,7 +147,7 @@ func convertTargets(in []winapi.Mapping) []Mapping {
 			}
 			targets = append(targets, t)
 		}
-		out = append(out, Mapping{VirtualRoot: m.VirtualRoot, Flags: m.Flags, Targets: targets})
+		out = append(out, Mapping{VirtualRoot: virt, Flags: m.Flags, Targets: targets})
 	}
 	return out
 }
