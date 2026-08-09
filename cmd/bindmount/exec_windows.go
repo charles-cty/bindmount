@@ -19,7 +19,7 @@ const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--pa
 
 func validPassthroughName(name string) bool {
 	switch name {
-	case "executable", "path", "cwd", "appstate":
+	case "executable", "path", "cwd", "gitroot", "appstate":
 		return true
 	default:
 		return false
@@ -72,7 +72,7 @@ func cmdExec(args []string) error {
 			i++
 		case "--passthrough", "--no-passthrough":
 			if i+1 >= len(ourArgs) || !validPassthroughName(ourArgs[i+1]) {
-				return fmt.Errorf("%s requires one of: executable, path, cwd, appstate", ourArgs[i])
+				return fmt.Errorf("%s requires one of: executable, path, cwd, gitroot, appstate", ourArgs[i])
 			}
 			name := ourArgs[i+1]
 			i++
@@ -98,7 +98,7 @@ func cmdExec(args []string) error {
 		return errors.New("exec requires a command to run inside the silo")
 	}
 	if rootDir != "" {
-		for _, name := range []string{"executable", "path", "cwd"} {
+		for _, name := range []string{"executable", "path", "cwd", "gitroot"} {
 			if !passthroughSet[name] {
 				passthrough[name] = true
 			}
@@ -160,6 +160,11 @@ func cmdExec(args []string) error {
 			return fmt.Errorf("get current working directory: %w", err)
 		}
 		if err := createWorkingDirectoryMapping(job, workingDir, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+	}
+	if passthrough["gitroot"] {
+		if err := createGitRootMapping(job, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
@@ -267,6 +272,26 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 		}
 	}
 	return nil
+}
+
+func createGitRootMapping(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get current working directory for gitroot passthrough: %w", err)
+	}
+	command := osExec.Command("git", "rev-parse", "--show-toplevel")
+	command.Dir = workingDir
+	output, err := command.Output()
+	if err != nil {
+		// Git is optional. A missing Git executable or a non-repository cwd
+		// simply means there is no gitroot passthrough to install.
+		return nil
+	}
+	root := strings.TrimSpace(string(output))
+	if root == "" {
+		return nil
+	}
+	return createPassthroughMapping(job, "gitroot", root, mapped, verbose)
 }
 
 func createExecutableMapping(job syscall.Handle, executablePath string, mapped map[string]bool, verbose bool) error {

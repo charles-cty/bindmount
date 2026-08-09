@@ -290,14 +290,20 @@ $execAppStatePassthrough.Text = 'Passthrough APPDATA, LOCALAPPDATA, and C:\Progr
 $execAppStatePassthrough.Location = New-Object Drawing.Point(20, 410)
 $execAppStatePassthrough.AutoSize = $true
 $execTab.Controls.Add($execAppStatePassthrough)
+$execGitRootPassthrough = New-Object Windows.Forms.CheckBox
+$execGitRootPassthrough.Text = 'Passthrough Git repository root'
+$execGitRootPassthrough.Location = New-Object Drawing.Point(20, 435)
+$execGitRootPassthrough.AutoSize = $true
+$execTab.Controls.Add($execGitRootPassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
         $execPassthrough.Checked = $true
         $execPathPassthrough.Checked = $true
         $execCwdPassthrough.Checked = $true
+        $execGitRootPassthrough.Checked = $true
     }
 })
-$execButton = Add-Button $execTab 'Create silo and run command' 20 445
+$execButton = Add-Button $execTab 'Create silo and run command' 20 470
 $execButton.Add_Click({
     Run-Action {
         if (-not $execName.Text -or -not $execCommand.Text) {
@@ -316,7 +322,8 @@ $execButton.Add_Click({
         foreach ($option in @(
             @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
             @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
-            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' }
+            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' },
+            @{ Checked = $execGitRootPassthrough.Checked; Name = 'gitroot' }
         )) {
             if ($option.Checked) {
                 $arguments += @('--passthrough', $option.Name)
