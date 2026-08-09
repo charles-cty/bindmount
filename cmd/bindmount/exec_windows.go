@@ -19,7 +19,7 @@ const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--pa
 
 func validPassthroughName(name string) bool {
 	switch name {
-	case "executable", "path", "cwd", "appdata":
+	case "executable", "path", "cwd", "appstate":
 		return true
 	default:
 		return false
@@ -72,7 +72,7 @@ func cmdExec(args []string) error {
 			i++
 		case "--passthrough", "--no-passthrough":
 			if i+1 >= len(ourArgs) || !validPassthroughName(ourArgs[i+1]) {
-				return fmt.Errorf("%s requires one of: executable, path, cwd, appdata", ourArgs[i])
+				return fmt.Errorf("%s requires one of: executable, path, cwd, appstate", ourArgs[i])
 			}
 			name := ourArgs[i+1]
 			i++
@@ -98,7 +98,7 @@ func cmdExec(args []string) error {
 		return errors.New("exec requires a command to run inside the silo")
 	}
 	if rootDir != "" {
-		for _, name := range []string{"executable", "path", "cwd", "appdata"} {
+		for _, name := range []string{"executable", "path", "cwd"} {
 			if !passthroughSet[name] {
 				passthrough[name] = true
 			}
@@ -163,8 +163,8 @@ func cmdExec(args []string) error {
 			return err
 		}
 	}
-	if passthrough["appdata"] {
-		if err := createAppDataMappings(job, mappedPassthrough, verbose); err != nil {
+	if passthrough["appstate"] {
+		if err := createAppStateMappings(job, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
@@ -249,11 +249,12 @@ func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose bool
 	return nil
 }
 
-func createAppDataMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
 	seen := make(map[string]bool)
 	for _, item := range []struct{ name, value string }{
 		{"appdata", os.Getenv("APPDATA")},
 		{"localappdata", os.Getenv("LOCALAPPDATA")},
+		{"programdata", os.Getenv("ProgramData")},
 	} {
 		path := filepath.Clean(item.value)
 		key := strings.ToLower(path)

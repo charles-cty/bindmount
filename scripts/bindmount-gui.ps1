@@ -285,17 +285,16 @@ $execCwdPassthrough.Text = 'Passthrough current directory'
 $execCwdPassthrough.Location = New-Object Drawing.Point(20, 385)
 $execCwdPassthrough.AutoSize = $true
 $execTab.Controls.Add($execCwdPassthrough)
-$execAppDataPassthrough = New-Object Windows.Forms.CheckBox
-$execAppDataPassthrough.Text = 'Passthrough APPDATA and LOCALAPPDATA'
-$execAppDataPassthrough.Location = New-Object Drawing.Point(20, 410)
-$execAppDataPassthrough.AutoSize = $true
-$execTab.Controls.Add($execAppDataPassthrough)
+$execAppStatePassthrough = New-Object Windows.Forms.CheckBox
+$execAppStatePassthrough.Text = 'Passthrough APPDATA, LOCALAPPDATA, and C:\ProgramData'
+$execAppStatePassthrough.Location = New-Object Drawing.Point(20, 410)
+$execAppStatePassthrough.AutoSize = $true
+$execTab.Controls.Add($execAppStatePassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
         $execPassthrough.Checked = $true
         $execPathPassthrough.Checked = $true
         $execCwdPassthrough.Checked = $true
-        $execAppDataPassthrough.Checked = $true
     }
 })
 $execButton = Add-Button $execTab 'Create silo and run command' 20 445
@@ -317,7 +316,7 @@ $execButton.Add_Click({
         foreach ($option in @(
             @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
             @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
-            @{ Checked = $execAppDataPassthrough.Checked; Name = 'appdata' }
+            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' }
         )) {
             if ($option.Checked) {
                 $arguments += @('--passthrough', $option.Name)

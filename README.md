@@ -82,16 +82,19 @@ bindmount silo kill <job-name>
 
 `--root` creates a backing directory for every drive visible when the silo is
 created. It is a launch-time snapshot, not a drive hot-plug monitor. When
-`--root` is supplied, four passthrough types are enabled by default:
+When `--root` is supplied, executable, PATH, and current-directory
+passthrough are enabled by default:
 
 - `executable` — expose the executable's containing directory.
 - `path` — expose every existing directory listed in `PATH`.
 - `cwd` — expose the launcher's current working directory.
-- `appdata` — expose `APPDATA` and `LOCALAPPDATA`.
+- `appstate` — expose `APPDATA`, `LOCALAPPDATA`, and `C:\ProgramData`.
 
 Each passthrough is read-write and can be independently controlled with
 `--passthrough <name>` or `--no-passthrough <name>`. Without `--root`, all
-passthrough types are disabled unless explicitly enabled.
+passthrough types are disabled unless explicitly enabled. `appstate` is
+opt-in even when `--root` is present because it exposes persistent application
+state rather than only launch-time dependencies.
 
 The `exec` command requires `--` before the child command. Options before `--`
 belong to `bindmount`; everything after it is passed to the launched process.
