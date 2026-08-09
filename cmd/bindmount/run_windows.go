@@ -14,10 +14,21 @@ import (
 
 const startfUseStdHandles = 0x00000100
 
+// Standard handle constants for GetStdHandle (public Win32 values).
+const (
+	stdInputHandle  = -10
+	stdOutputHandle = -11
+	stdErrorHandle  = -12
+)
+
+// waitFailed is the WAIT_FAILED sentinel returned by WaitForSingleObject on
+// error; the syscall package does not export this constant.
+const waitFailed = 0xFFFFFFFF
+
 func inheritStandardHandles(si *syscall.StartupInfo) {
-	in, inErr := syscall.GetStdHandle(-10) // STD_INPUT_HANDLE
-	out, outErr := syscall.GetStdHandle(-11)
-	errHandle, errErr := syscall.GetStdHandle(-12)
+	in, inErr := syscall.GetStdHandle(stdInputHandle)
+	out, outErr := syscall.GetStdHandle(stdOutputHandle)
+	errHandle, errErr := syscall.GetStdHandle(stdErrorHandle)
 	if inErr == nil && outErr == nil && errErr == nil && in != 0 && out != 0 && errHandle != 0 {
 		si.StdInput = in
 		si.StdOutput = out
@@ -64,7 +75,7 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error
 
 	var si winapi.StartupInfoEx
 	si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
-	si.AttributeList = attrList
+	si.AttributeList = unsafe.Pointer(&attrList[0])
 	inheritStandardHandles(&si.StartupInfo)
 
 	cmdPtr, err := syscall.UTF16PtrFromString(cmdLine)
@@ -99,7 +110,9 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error
 	// wired up, which is what a bind-mount helper wants: run the command as
 	// if the caller had launched it, just inside the silo.
 
-	syscall.WaitForSingleObject(pi.Process, syscall.INFINITE)
+	if ret, waitErr := syscall.WaitForSingleObject(pi.Process, syscall.INFINITE); ret == waitFailed {
+		return 0, fmt.Errorf("WaitForSingleObject: %w", waitErr)
+	}
 
 	var exitCode uint32
 	if err := syscall.GetExitCodeProcess(pi.Process, &exitCode); err != nil {
@@ -209,7 +222,9 @@ func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint3
 		return 0, nil
 	}
 
-	syscall.WaitForSingleObject(pi.Process, syscall.INFINITE)
+	if ret, waitErr := syscall.WaitForSingleObject(pi.Process, syscall.INFINITE); ret == waitFailed {
+		return 0, fmt.Errorf("WaitForSingleObject: %w", waitErr)
+	}
 
 	var exitCode uint32
 	if err := syscall.GetExitCodeProcess(pi.Process, &exitCode); err != nil {

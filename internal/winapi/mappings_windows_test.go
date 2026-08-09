@@ -147,3 +147,72 @@ func TestParseMappingsCheckedRejectsNonZeroStatus(t *testing.T) {
 		t.Fatal("expected error for non-zero filter status")
 	}
 }
+
+// buildEmptyResponse builds a valid BfGetMappings response with zero mappings.
+func buildEmptyResponse() []byte {
+	buf := make([]byte, 12)
+	binary.LittleEndian.PutUint32(buf[0:], 12) // Size
+	binary.LittleEndian.PutUint32(buf[4:], 0)  // Status
+	binary.LittleEndian.PutUint32(buf[8:], 0)  // MappingCount = 0
+	return buf
+}
+
+func TestParseMappingsCheckedZeroMappings(t *testing.T) {
+	buf := buildEmptyResponse()
+	ms, err := ParseMappingsChecked(buf, uint32(len(buf)))
+	if err != nil {
+		t.Fatalf("ParseMappingsChecked: %v", err)
+	}
+	if len(ms) != 0 {
+		t.Fatalf("got %d mappings, want 0", len(ms))
+	}
+}
+
+func TestParseMappingsCheckedZeroTargets(t *testing.T) {
+	// A mapping with no targets is valid (the filter returns it that way for
+	// orphaned mappings).
+	buf := buildResponse(`\Device\HarddiskVolume3\v`, 0x01, nil)
+	ms, err := ParseMappingsChecked(buf, uint32(len(buf)))
+	if err != nil {
+		t.Fatalf("ParseMappingsChecked: %v", err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("got %d mappings, want 1", len(ms))
+	}
+	if len(ms[0].Targets) != 0 {
+		t.Fatalf("got %d targets, want 0", len(ms[0].Targets))
+	}
+	if ms[0].Flags != 0x01 {
+		t.Errorf("flags = 0x%X, want 0x01", ms[0].Flags)
+	}
+}
+
+func TestParseMappingsCheckedMultiTargetStrings(t *testing.T) {
+	// Verify that both target strings are decoded correctly, not just the count.
+	t1 := `\Device\HarddiskVolume3\backing1`
+	t2 := `\Device\HarddiskVolume3\backing2`
+	buf := buildResponse(`\Device\HarddiskVolume3\v`, 0x02, []string{t1, t2})
+	ms, err := ParseMappingsChecked(buf, uint32(len(buf)))
+	if err != nil {
+		t.Fatalf("ParseMappingsChecked: %v", err)
+	}
+	if len(ms) != 1 || len(ms[0].Targets) != 2 {
+		t.Fatalf("unexpected shape: %+v", ms)
+	}
+	if ms[0].Targets[0] != t1 {
+		t.Errorf("target[0] = %q, want %q", ms[0].Targets[0], t1)
+	}
+	if ms[0].Targets[1] != t2 {
+		t.Errorf("target[1] = %q, want %q", ms[0].Targets[1], t2)
+	}
+}
+
+func TestParseMappingsCheckedRejectsBadTargetOffset(t *testing.T) {
+	buf := buildResponse(`\Device\HarddiskVolume3\v`, 0, []string{`\Device\HarddiskVolume3\b`})
+	// Corrupt the target string offset (bytes 4–7 of the target entry, which
+	// starts at headerSize+entrySize = 12+20 = 32, so offset field at 36).
+	binary.LittleEndian.PutUint32(buf[36:], uint32(len(buf)+100))
+	if _, err := ParseMappingsChecked(buf, uint32(len(buf))); err == nil {
+		t.Fatal("expected error for out-of-range target string offset")
+	}
+}

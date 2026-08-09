@@ -304,22 +304,28 @@ $execCwdPassthrough.Text = 'Passthrough current directory'
 $execCwdPassthrough.Location = New-Object Drawing.Point(20, 360)
 $execCwdPassthrough.AutoSize = $true
 $execTab.Controls.Add($execCwdPassthrough)
-$execAppStatePassthrough = New-Object Windows.Forms.CheckBox
-$execAppStatePassthrough.Text = 'Passthrough APPDATA, LOCALAPPDATA, and C:\ProgramData'
-$execAppStatePassthrough.Location = New-Object Drawing.Point(360, 360)
-$execAppStatePassthrough.AutoSize = $true
-$execTab.Controls.Add($execAppStatePassthrough)
+$execAppExecPassthrough = New-Object Windows.Forms.CheckBox
+$execAppExecPassthrough.Text = 'Passthrough Windows app execution aliases'
+$execAppExecPassthrough.Location = New-Object Drawing.Point(360, 360)
+$execAppExecPassthrough.AutoSize = $true
+$execTab.Controls.Add($execAppExecPassthrough)
 $execGitRootPassthrough = New-Object Windows.Forms.CheckBox
 $execGitRootPassthrough.Text = 'Passthrough Git repository root'
 $execGitRootPassthrough.Location = New-Object Drawing.Point(20, 385)
 $execGitRootPassthrough.AutoSize = $true
 $execTab.Controls.Add($execGitRootPassthrough)
+$execAppStatePassthrough = New-Object Windows.Forms.CheckBox
+$execAppStatePassthrough.Text = 'Passthrough APPDATA, LOCALAPPDATA, and C:\ProgramData'
+$execAppStatePassthrough.Location = New-Object Drawing.Point(360, 385)
+$execAppStatePassthrough.AutoSize = $true
+$execTab.Controls.Add($execAppStatePassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
         $execPassthrough.Checked = $true
         $execPathPassthrough.Checked = $true
         $execCwdPassthrough.Checked = $true
         $execGitRootPassthrough.Checked = $true
+        $execAppExecPassthrough.Checked = $true
     }
 })
 Add-Label $execTab 'Current working directory:' 20 415
@@ -349,8 +355,9 @@ $execButton.Add_Click({
         foreach ($option in @(
             @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
             @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
-            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' },
-            @{ Checked = $execGitRootPassthrough.Checked; Name = 'gitroot' }
+            @{ Checked = $execGitRootPassthrough.Checked; Name = 'gitroot' },
+            @{ Checked = $execAppExecPassthrough.Checked; Name = 'appexec' },
+            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' }
         )) {
             if ($option.Checked) {
                 $arguments += @('--passthrough', $option.Name)

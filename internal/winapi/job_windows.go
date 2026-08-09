@@ -67,6 +67,8 @@ type jobobjectExtendedLimitInformation struct {
 
 // CreateJob creates a new job object. name may be empty for an unnamed job;
 // a non-empty name is created in the Global\ namespace when it has no prefix.
+// Returns an error if the name already exists, preventing silent reuse of an
+// existing job that may already hold processes.
 func CreateJob(name string) (Handle, error) {
 	var namePtr *uint16
 	var err error
@@ -82,6 +84,13 @@ func CreateJob(name string) (Handle, error) {
 			return 0, callErr
 		}
 		return 0, fmt.Errorf("CreateJobObjectW failed")
+	}
+	// CreateJobObjectW succeeds even when the name already exists, returning
+	// the existing handle. Detect this via ERROR_ALREADY_EXISTS and refuse to
+	// reuse the existing job, which may already contain foreign processes.
+	if callErr == syscall.ERROR_ALREADY_EXISTS {
+		syscall.CloseHandle(syscall.Handle(h))
+		return 0, fmt.Errorf("job %q already exists", name)
 	}
 	return Handle(h), nil
 }

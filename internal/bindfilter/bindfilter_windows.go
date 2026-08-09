@@ -5,6 +5,8 @@ package bindfilter
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -32,6 +34,29 @@ func (o Options) setupFlags(scopeFlags uint32) uint32 {
 	return flags
 }
 
+// isFileLevelMapping reports whether the virtual root and target describe a
+// file-to-file mapping rather than a directory-to-directory one. File-level
+// mappings require BINDFLT_FLAG_REPARSE_ON_FILES; without it, BfSetupFilter
+// rejects them on some Windows builds.
+//
+// Detection priority:
+//  1. os.Stat the target — if accessible and not a directory, it is a file.
+//  2. Fallback: treat either path as a file when its last component contains
+//     a dot (i.e. has a file extension). This handles targets in ACL-restricted
+//     directories (e.g. C:\Program Files\WindowsApps) where stat would fail.
+func isFileLevelMapping(virtualRoot, target string) bool {
+	if info, err := os.Stat(target); err == nil {
+		return !info.IsDir()
+	}
+	// Fallback: extension heuristic on both paths.
+	hasExt := func(p string) bool {
+		base := filepath.Base(p)
+		dot := strings.LastIndexByte(base, '.')
+		return dot > 0 && dot < len(base)-1
+	}
+	return hasExt(target) || hasExt(virtualRoot)
+}
+
 // CreateGlobal creates a mapping visible to all processes on the host.
 // The mapping must later be removed with RemoveGlobal.
 func CreateGlobal(virtualRoot, target string, opts Options) error {
@@ -39,6 +64,9 @@ func CreateGlobal(virtualRoot, target string, opts Options) error {
 		return errors.New("virtual root and target are required")
 	}
 	flags := opts.setupFlags(winapi.BINDFLT_FLAG_NO_MULTIPLE_TARGETS)
+	if isFileLevelMapping(virtualRoot, target) {
+		flags |= winapi.BINDFLT_FLAG_REPARSE_ON_FILES
+	}
 	return winapi.SetupFilter(0, flags, virtualRoot, target, opts.Exceptions)
 }
 
@@ -60,6 +88,9 @@ func CreateSilo(job winapi.Handle, virtualRoot, target string, opts Options) err
 		return errors.New("virtual root and target are required")
 	}
 	flags := opts.setupFlags(winapi.BINDFLT_FLAG_USE_CURRENT_SILO_MAPPING)
+	if isFileLevelMapping(virtualRoot, target) {
+		flags |= winapi.BINDFLT_FLAG_REPARSE_ON_FILES
+	}
 	return winapi.SetupFilter(job, flags, virtualRoot, target, opts.Exceptions)
 }
 

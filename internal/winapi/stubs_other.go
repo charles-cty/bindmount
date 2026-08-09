@@ -41,6 +41,9 @@ func SetKillOnJobClose(job Handle) error                 { return errENOSYS }
 func PromoteToSilo(job Handle) error                     { return errENOSYS }
 func AssignProcessToJob(job, process Handle) error       { return errENOSYS }
 
+// ReadAppExecLink stub — APPEXECLINK reparse points only exist on Windows.
+func ReadAppExecLink(_ string) (string, error) { return "", errENOSYS }
+
 var errENOSYS = errorString("function not implemented on this platform")
 
 type errorString string

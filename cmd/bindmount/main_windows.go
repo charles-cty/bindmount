@@ -70,7 +70,9 @@ func newSiloCommand() *cobra.Command {
 			// Named Job Objects created by the CLI use the creator's default
 			// security descriptor; request the same access used by mapping/list
 			// operations so existence checks work for those jobs.
-			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_ALL_ACCESS)
+			// JOB_OBJECT_QUERY is sufficient for an existence check and
+			// requires fewer privileges than JOB_OBJECT_ALL_ACCESS.
+			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_QUERY)
 			if err != nil {
 				if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
 					fmt.Printf("bindmount: silo %q does not exist\n", args[0])

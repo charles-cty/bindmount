@@ -44,3 +44,56 @@ func TestNTVirtualRootToDOSFallback(t *testing.T) {
 		t.Errorf("NTVirtualRootToDOS(%q) = %q, want unchanged", in2, got)
 	}
 }
+
+func TestNTVirtualRootToDOSTrailingBackslash(t *testing.T) {
+	sysDrive, dev := firstDrive(t)
+	// Trailing backslash must be preserved round-trip.
+	in := dev + `\Temp\`
+	got := NTVirtualRootToDOS(in)
+	want := sysDrive + `\Temp\`
+	if got != want {
+		t.Errorf("NTVirtualRootToDOS(%q) = %q, want %q", in, got, want)
+	}
+}
+
+func TestNTVirtualRootToDOSVolumeRootOnly(t *testing.T) {
+	sysDrive, dev := firstDrive(t)
+	// A path that is just the volume device with no subpath.
+	got := NTVirtualRootToDOS(dev)
+	want := sysDrive
+	if got != want {
+		t.Errorf("NTVirtualRootToDOS(%q) = %q, want %q", dev, got, want)
+	}
+}
+
+func TestNTVirtualRootToDOSAllMappedDrives(t *testing.T) {
+	// Every drive that QueryDosDevice resolves must round-trip through
+	// NTVirtualRootToDOS correctly.
+	for letter := 'A'; letter <= 'Z'; letter++ {
+		drive := string(letter) + ":"
+		dev, err := queryDosDevice(drive)
+		if err != nil {
+			continue // drive not present
+		}
+		got := NTVirtualRootToDOS(dev + `\sub`)
+		want := drive + `\sub`
+		if got != want {
+			t.Errorf("drive %s: NTVirtualRootToDOS(%q) = %q, want %q",
+				drive, dev+`\sub`, got, want)
+		}
+	}
+}
+
+// firstDrive returns the first resolvable drive letter and its NT device path,
+// skipping the test if none is found.
+func firstDrive(t *testing.T) (drive, dev string) {
+	t.Helper()
+	for letter := 'A'; letter <= 'Z'; letter++ {
+		d := string(letter) + ":"
+		if nt, err := queryDosDevice(d); err == nil {
+			return d, nt
+		}
+	}
+	t.Skip("no drive letters found")
+	return "", ""
+}

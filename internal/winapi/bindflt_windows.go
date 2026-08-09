@@ -3,6 +3,7 @@
 package winapi
 
 import (
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -16,6 +17,8 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
+	loadOnce      sync.Once
+	loadErr       error
 	modbindfltapi *syscall.DLL
 
 	procBfSetupFilter     *syscall.Proc
@@ -26,13 +29,15 @@ var (
 )
 
 // loadBindfltapi loads bindfltapi.dll from System32 and resolves the exports
-// used by this package. It is called lazily; callers get ErrBindfltUnavailable
-// when the DLL or a required export is missing.
+// used by this package. It is called lazily and is safe for concurrent use;
+// callers get ErrBindfltUnavailable when the DLL or a required export is
+// missing.
 func loadBindfltapi() error {
-	if modbindfltapi != nil {
-		return nil
-	}
+	loadOnce.Do(func() { loadErr = doLoadBindfltapi() })
+	return loadErr
+}
 
+func doLoadBindfltapi() error {
 	systemDir, err := syscall.UTF16PtrFromString(`%SystemRoot%\System32`)
 	if err != nil {
 		return err

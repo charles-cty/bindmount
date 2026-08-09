@@ -19,7 +19,7 @@ const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--pa
 
 func validPassthroughName(name string) bool {
 	switch name {
-	case "executable", "path", "cwd", "gitroot", "appstate":
+	case "executable", "path", "cwd", "gitroot", "appstate", "appexec":
 		return true
 	default:
 		return false
@@ -98,7 +98,7 @@ func cmdExec(args []string) error {
 		return errors.New("exec requires a command to run inside the silo")
 	}
 	if rootDir != "" {
-		for _, name := range []string{"executable", "path", "cwd", "gitroot"} {
+		for _, name := range []string{"executable", "path", "cwd", "gitroot", "appexec"} {
 			if !passthroughSet[name] {
 				passthrough[name] = true
 			}
@@ -170,6 +170,11 @@ func cmdExec(args []string) error {
 	}
 	if passthrough["appstate"] {
 		if err := createAppStateMappings(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+	}
+	if passthrough["appexec"] {
+		if err := createAppExecMappings(job, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
@@ -268,6 +273,73 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 		}
 		seen[key] = true
 		if err := createPassthroughMapping(job, item.name, path, mapped, verbose); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createAppExecMappings resolves every App Execution Alias (.exe reparse
+// point) under %LOCALAPPDATA%\Microsoft\WindowsApps and installs two bind
+// links for each one inside the silo:
+//
+//  1. A file-level link that replaces the APPEXECLINK stub with the real
+//     executable so the silo process gets an actual binary, not a reparse
+//     node that requires App Model activation infrastructure.
+//
+//  2. A directory passthrough for the folder that contains the real binary,
+//     ensuring the executable's sibling DLLs and data files are also visible.
+//
+// The WindowsApps directory itself is silently skipped if it cannot be read
+// or if none of its entries carry an APPEXECLINK reparse tag; this keeps
+// appexec opt-in and non-fatal.
+func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		return nil
+	}
+	windowsAppsDir := filepath.Join(localAppData, "Microsoft", "WindowsApps")
+
+	entries, err := os.ReadDir(windowsAppsDir)
+	if err != nil {
+		// WindowsApps is absent or inaccessible — not an error for the caller.
+		return nil
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !strings.EqualFold(filepath.Ext(entry.Name()), ".exe") {
+			continue
+		}
+		aliasPath := filepath.Join(windowsAppsDir, entry.Name())
+
+		realExe, err := winapi.ReadAppExecLink(aliasPath)
+		if err != nil || realExe == "" {
+			// Not an APPEXECLINK or data unreadable — skip silently.
+			continue
+		}
+		realExe = filepath.Clean(realExe)
+
+		// File-level bind link: alias stub → real executable.
+		// This replaces the APPEXECLINK node with the actual binary inside
+		// the silo so that CreateProcess / LoadLibrary finds a real PE.
+		// Bind Filter may reject file-level virtualRoots on some builds; the
+		// error is treated as non-fatal so the directory passthrough below is
+		// always installed regardless.
+		if err := bindfilter.CreateSilo(syscall.Handle(job), aliasPath, realExe, bindfilter.Options{}); err != nil {
+			if verbose {
+				fmt.Printf("bindmount: appexec link %s -> %s: %v (skipped)\n", aliasPath, realExe, err)
+			}
+		} else if verbose {
+			fmt.Printf("bindmount: appexec link %s -> %s\n", aliasPath, realExe)
+		}
+
+		// Directory passthrough for the real binary's parent folder so the
+		// executable and its sibling files are reachable inside the silo even
+		// when --root has shadowed that drive.
+		if err := createPassthroughMapping(job, "appexec", filepath.Dir(realExe), mapped, verbose); err != nil {
 			return err
 		}
 	}
@@ -377,6 +449,16 @@ func parseLinkFlags(args []string) ([]linkSpec, error) {
 	return specs, nil
 }
 
+// splitLinkSpec parses a single mapping specification of the form
+// root[+][=|==]target.
+//
+//   - A bare "=" separator creates a writable (default) mapping.
+//   - A "==" separator creates a read-only mapping.
+//   - A "+" immediately before the separator enables merged mode.
+//
+// Limitation: a literal "+" at the end of the root path is indistinguishable
+// from the merged-mode marker. Paths containing a trailing "+" must be
+// supplied as two separate arguments to the "add" command instead.
 func splitLinkSpec(s string) (root, target string, readOnly, merged, ok bool) {
 	separatorIndex := strings.IndexByte(s, '=')
 	if separatorIndex <= 0 {

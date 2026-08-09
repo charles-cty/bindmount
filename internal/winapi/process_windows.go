@@ -110,8 +110,11 @@ func DeleteProcThreadAttributeList(attrList ProcThreadAttributeList) {
 	procDeleteProcThreadAttributeList.Call(uintptr(unsafe.Pointer(&attrList[0])))
 }
 
-// STARTUPINFOEXW as defined by the SDK.
+// StartupInfoEx mirrors STARTUPINFOEXW. AttributeList must hold the data
+// pointer of the attribute-list buffer (obtained from
+// InitializeProcThreadAttributeList), matching the SDK's
+// LPPROC_THREAD_ATTRIBUTE_LIST field.
 type StartupInfoEx struct {
 	StartupInfo   syscall.StartupInfo
-	AttributeList ProcThreadAttributeList
+	AttributeList unsafe.Pointer // LPPROC_THREAD_ATTRIBUTE_LIST
 }
