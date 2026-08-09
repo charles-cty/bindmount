@@ -2,41 +2,31 @@
 
 `bindmount` manages Windows Bind Links (global or silo-scoped) through the
 Bind Filter (`bindflt.sys`), as alternatives to Linux bind mounts and mount
-namespaces. It provides:
+namespaces on Windows. It provides:
 
-- **`bindmount`** — a CLI for creating, removing, listing, and using bind links;
+- **`bindmount`** — a CLI tool for creating, removing, listing, and using bind links;
 - **`bindmount-gui.ps1`** — a PowerShell WinForms helper that shows the current global
-  mappings and exposes add/remove/silo-launch operations (the CLI remains the
-  primary interface). The silo-launch tab enables a read-write
-  `C:\Windows=C:\Windows` scoped link by default; clear that option to omit it.
+  mappings and exposes various operations (the CLI remains the primary interface).
 
-It is designed to be simple, stateless, and easy to use: no daemon, no
-persistent state file. The kernel is the source of truth; `bindmount list`
-reads live state from the filter.
+It is designed to be simple, stateless, and easy to use: no daemon, no persistence.
 
 > **Research note:** [`docs/BindFilterAPI.md`](docs/BindFilterAPI.md) is an
 > evolving, project-wide research and implementation document. It may change
 > as Windows builds and experiments provide new evidence; it is not a static
-> source of truth or a supported Microsoft API contract. The implementation
+> source of truth or a supported Microsoft API document. The implementation
 > validates all data returned by the undocumented interface and prefers the
 > public Bindlink API where practical.
 
 **WARNING**: This project uses several internal or undocumented Windows
 mechanisms and APIs. They are already used by Microsoft in its open-source
-projects (go-winio, hcsshim, mxc, ...), so they are relatively stable — but
-they are not a supported contract.
+projects (go-winio, hcsshim, mxc, ...), so they are relatively stable.
 
 ## Requirements
 
-- Windows 10 20H1+ / Windows Server 2022+ (developed and smoke-tested on
-  Windows build 26100, `bindfltapi.dll` 10.0.26100.33158).
-- `bindflt.sys` loaded (`fltmc filters` shows `bindflt`, altitude 409800 on
-  the tested build). Windows loads it on demand.
-- **Elevation** for `add`, `remove`, and `exec` (the driver enforces access;
-  `list` works from a normal elevated or non-elevated context for the volume
-  query on the tested build).
-- Go 1.22+ to build the CLI, and PowerShell 5.1+ with Windows Forms for the GUI.
-  The CLI uses Cobra/pflag for command-line parsing.
+- Windows 10+ / Windows Server 2022+
+- `bindflt.sys` loaded (`fltmc filters`). Windows loads it automatically.
+- **Elevation** (requires the Administrators privilege)
+- Go 1.22+ to build the CLI, and PowerShell 5.1+ with WinForms for the GUI.
 
 ## Build
 
@@ -53,8 +43,7 @@ Set-Location C:\My\Projects\bindmount
 ```
 
 The script builds `dist\bindmount.exe`, copies the GUI script, and uses
-`Compress-Archive` for releases. It requires only Go and PowerShell; WSL,
-Bash, MSYS2, and 7-Zip are not required.
+`Compress-Archive` for releases. It requires only Go and PowerShell.
 
 From WSL or another Unix-like environment, the Makefile remains available:
 
@@ -75,11 +64,6 @@ Run the GUI from PowerShell:
 ```powershell
 .\dist\bindmount-gui.ps1
 ```
-
-The GUI uses `exec --detach` automatically. In detached mode, `bindmount.exe`
-creates the silo and launches the requested command, then exits; the command
-inherits the Job Object handle and therefore keeps the silo alive until the
-workload exits.
 
 Cross-compiling from Linux/WSL works because the project uses only the
 standard library (`syscall`), no cgo.
@@ -119,6 +103,16 @@ mapping is created.
 
 The `exec` command requires `--` before the child command. Options before `--`
 belong to `bindmount`; everything after it is passed to the launched process.
+
+## GUI usage
+
+Just run the GUI helper script by yourself. It doesn't need Electron/WebView/CEF.
+It won't install a bunch of runtimes or consume a lot of RAM on your machine.
+
+The GUI uses `exec --detach` automatically. In detached mode, `bindmount.exe`
+creates the silo and launches the requested command, then exits; the command
+inherits the Job Object handle and therefore keeps the silo alive until the
+workload exits.
 
 ### Global mappings
 
@@ -251,6 +245,8 @@ End-to-end behavior (actually creating mappings) requires an elevated Windows
 host with `bindflt` loaded; see docs/BindFilterAPI.md for the environment the
 ABI details were verified against.
 
+The testing coverage of this project is currently not good. Needs improvements.
+
 ## License
 
-TBD
+MIT
