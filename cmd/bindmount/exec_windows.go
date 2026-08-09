@@ -143,12 +143,12 @@ func cmdExec(args []string) error {
 	if err := winapi.PromoteToSilo(job); err != nil {
 		return fmt.Errorf("promote job to silo: %w", err)
 	}
+	mappedPassthrough := make(map[string]bool)
 	if rootDir != "" {
-		if err := createRootMappings(job, rootDir, verbose); err != nil {
+		if err := createRootMappings(job, rootDir, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
-	mappedPassthrough := make(map[string]bool)
 	if passthrough["path"] {
 		if err := createPathMappings(job, mappedPassthrough, verbose); err != nil {
 			return err
@@ -181,7 +181,7 @@ func cmdExec(args []string) error {
 
 	// Create any requested silo-scoped links before launching the process.
 	for _, l := range linkSpecs {
-		if err := createSiloLink(job, l, verbose); err != nil {
+		if err := createSiloLink(job, l, mappedPassthrough, verbose); err != nil {
 			return err
 		}
 	}
@@ -299,7 +299,7 @@ func createExecutableMapping(job syscall.Handle, executablePath string, mapped m
 	return createPassthroughMapping(job, "executable", virtualRoot, mapped, verbose)
 }
 
-func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error {
+func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bool, verbose bool) error {
 	if dataDir == "" {
 		return errors.New("root data directory is required")
 	}
@@ -313,9 +313,13 @@ func createRootMappings(job syscall.Handle, dataDir string, verbose bool) error 
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("create root backing %s: %w", target, err)
 		}
+		if mapped[strings.ToLower(root)] {
+			continue
+		}
 		if err := bindfilter.CreateSilo(job, root, target, bindfilter.Options{}); err != nil {
 			return fmt.Errorf("create root mapping %s -> %s: %w", root, target, err)
 		}
+		mapped[strings.ToLower(root)] = true
 		if verbose {
 			fmt.Printf("bindmount: mapping drive %s -> %s\n", root, target)
 		}
@@ -381,7 +385,11 @@ func splitLinkSpec(s string) (root, target string, readOnly, merged, ok bool) {
 	return root, s[separatorIndex+len(separator):], readOnly, merged, true
 }
 
-func createSiloLink(job syscall.Handle, l linkSpec, verbose bool) error {
+func createSiloLink(job syscall.Handle, l linkSpec, mapped map[string]bool, verbose bool) error {
+	key := strings.ToLower(filepath.Clean(l.root))
+	if mapped[key] {
+		return nil
+	}
 	opts := bindfilter.Options{ReadOnly: l.readOnly, Merged: l.merged}
 	err := bindfilter.CreateSilo(job, l.root, l.target, opts)
 	if err != nil {
@@ -390,6 +398,7 @@ func createSiloLink(job syscall.Handle, l linkSpec, verbose bool) error {
 	if verbose {
 		fmt.Printf("bindmount: mapping user %s -> %s\n", l.root, l.target)
 	}
+	mapped[key] = true
 	// Mapping setup is intentionally quiet for exec: the launched command is
 	// the user-facing process, and its console should not be prefixed by
 	// supervisor diagnostics.
