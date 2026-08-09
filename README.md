@@ -40,7 +40,23 @@ they are not a supported contract.
 
 ## Build
 
-The code is Windows-only (`GOOS=windows`). From WSL or any Go toolchain:
+The code is Windows-only (`GOOS=windows`). The native Windows build entry point
+is the PowerShell script:
+
+```powershell
+Set-Location C:\My\Projects\bindmount
+.\scripts\build.ps1
+.\scripts\build.ps1 -Clean
+.\scripts\build.ps1 -Test
+.\scripts\build.ps1 -Vet
+.\scripts\build.ps1 -Release
+```
+
+The script builds `dist\bindmount.exe`, copies the GUI script, and uses
+`Compress-Archive` for releases. It requires only Go and PowerShell; WSL,
+Bash, MSYS2, and 7-Zip are not required.
+
+From WSL or another Unix-like environment, the Makefile remains available:
 
 ```sh
 make build            # regenerates dist/bindmount.exe and dist/bindmount-gui.ps1
