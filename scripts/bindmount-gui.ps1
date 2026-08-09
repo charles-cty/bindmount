@@ -66,6 +66,12 @@ function Start-Bindmount([string[]]$Arguments) {
     $argumentString = $quotedArguments -join ' '
     $process = Start-Process -FilePath $cli -ArgumentList $argumentString `
         -WorkingDirectory (Split-Path -Parent $cli) -WindowStyle Normal -PassThru
+    if ($process.WaitForExit(1500)) {
+        if ($process.ExitCode -ne 0) {
+            throw "The requested process could not be launched. The bindmount launcher reported exit code $($process.ExitCode)."
+        }
+        return 'Silo process started successfully.'
+    }
     return "Started bindmount exec (PID $($process.Id))."
 }
 
