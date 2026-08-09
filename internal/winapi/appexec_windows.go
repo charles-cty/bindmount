@@ -38,10 +38,15 @@ const (
 //	[8:12]  ULONG  Version           (always 3 in practice)
 //	[12:16] ULONG  StringCount       (typically 4)
 //	[16:…]  null-terminated UTF-16LE strings, concatenated:
-//	          [0] Package full name
+//	          [0] Package family name (for activation)
 //	          [1] Entry point (AppUserModelId)
 //	          [2] Executable path        ← the value we want
 //	          [3] Application type flag  ("0" for regular UWP)
+//
+// The StringCount field is occasionally observed to contain garbage (the
+// first bytes of string[0]) on build 26100, so the parser does not trust it:
+// it scans the payload for null-terminated strings by shape and stops at the
+// first unterminated or empty entry.
 const (
 	appExecLinkHeaderSize    = 8  // ReparseTag + ReparseDataLength + Reserved
 	appExecLinkVersionOffset = 8  // Version field
@@ -96,15 +101,16 @@ func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 	if tag != ioReparseTagAppExecLink {
 		return nil, fmt.Errorf("%q: reparse tag 0x%08X is not APPEXECLINK", path, tag)
 	}
-	count := binary.LittleEndian.Uint32(buf[appExecLinkCountOffset : appExecLinkCountOffset+4])
-	if count <= appExecLinkExeStringIdx {
-		return nil, fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
-			path, count, appExecLinkExeStringIdx+1)
-	}
 
-	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffset:returned], count)
+	// Do not trust the StringCount field (see the layout comment above);
+	// scan the payload for null-terminated strings by shape instead.
+	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffset:returned])
 	if err != nil {
 		return nil, err
+	}
+	if len(strings) <= appExecLinkExeStringIdx {
+		return nil, fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
+			path, len(strings), appExecLinkExeStringIdx+1)
 	}
 	return &AppExecLinkInfo{
 		PackageFullName: strings[0],
@@ -122,12 +128,15 @@ func ReadAppExecLink(path string) (string, error) {
 	return info.ExePath, nil
 }
 
-// parseAllAppExecLinkStrings decodes all null-terminated UTF-16LE strings
-// from the APPEXECLINK string payload and returns them as a slice.
-func parseAllAppExecLinkStrings(data []byte, count uint32) ([]string, error) {
-	out := make([]string, 0, count)
+// parseAllAppExecLinkStrings decodes the null-terminated UTF-16LE string
+// list in the APPEXECLINK payload and returns every string found. Scanning
+// stops at the first unterminated or empty entry; the documented layout has
+// exactly four strings followed by no payload, so a trailing partial read
+// marks the end of the list rather than a format error.
+func parseAllAppExecLinkStrings(data []byte) ([]string, error) {
+	var out []string
 	pos := 0
-	for i := uint32(0); i < count; i++ {
+	for pos+1 < len(data) {
 		// Scan forward two bytes at a time looking for a UTF-16 null terminator.
 		end := pos
 		for end+1 < len(data) {
@@ -136,9 +145,14 @@ func parseAllAppExecLinkStrings(data []byte, count uint32) ([]string, error) {
 			}
 			end += 2
 		}
-		// If end+1 is out of range the null terminator was never found.
+		// If end+1 is out of range the null terminator was never found:
+		// that is the end of the string list, not an error.
 		if end+1 >= len(data) {
-			return nil, fmt.Errorf("unterminated string %d in APPEXECLINK data", i)
+			break
+		}
+		if end == pos {
+			// Empty entry: the string list is over.
+			break
 		}
 		length := (end - pos) / 2
 		units := make([]uint16, length)
@@ -150,4 +164,3 @@ func parseAllAppExecLinkStrings(data []byte, count uint32) ([]string, error) {
 	}
 	return out, nil
 }
-

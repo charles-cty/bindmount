@@ -283,12 +283,14 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 // point) under %LOCALAPPDATA%\Microsoft\WindowsApps and installs two bind
 // links for each one inside the silo:
 //
-//  1. A file-level link that replaces the APPEXECLINK stub with the real
-//     executable so the silo process gets an actual binary, not a reparse
-//     node that requires App Model activation infrastructure.
+//  1. A directory passthrough for the folder that contains the real binary,
+//     ensuring the executable's sibling DLLs and data files are visible to
+//     the activation path inside the silo.
 //
-//  2. A directory passthrough for the folder that contains the real binary,
-//     ensuring the executable's sibling DLLs and data files are also visible.
+//  2. A best-effort file-level link that replaces the APPEXECLINK stub with
+//     the real executable. The Bind Filter rejects file-level virtual roots
+//     that are themselves reparse points, so this usually fails and is only
+//     a fallback for builds that accept it.
 //
 // The WindowsApps directory itself is silently skipped if it cannot be read
 // or if none of its entries carry an APPEXECLINK reparse tag; this keeps
@@ -329,25 +331,32 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		}
 		realExe = filepath.Clean(realExe)
 
+		// Directory passthrough for the real binary's package folder. The
+		// App Model activation path dereferences the APPEXECLINK's embedded
+		// executable path using the silo's own view, so the package folder
+		// must be visible inside the silo; under --root that drive has been
+		// shadowed by an empty backing tree. Best-effort: an alias whose
+		// package folder was removed by an app update (stale reparse data)
+		// is skipped rather than aborting the whole appexec pass.
+		if err := createPassthroughMapping(job, "appexec", filepath.Dir(realExe), mapped, verbose); err != nil {
+			if verbose {
+				fmt.Printf("bindmount: appexec package %s: %v (skipped)\n", filepath.Dir(realExe), err)
+			}
+			continue
+		}
+
 		// File-level bind link: alias stub → real executable.
-		// Replaces the APPEXECLINK reparse node with the actual binary so
-		// CreateProcess finds a real PE rather than an activation stub.
-		// Non-fatal: if the Bind Filter rejects file-level virtual roots on
-		// this build, the directory passthrough below still makes the real
-		// binary reachable by its full path.
+		// Best-effort only: BfSetupFilter rejects a file-level virtual root
+		// whose physical node is itself a reparse point (the APPEXECLINK
+		// stub) with ERROR_CANT_ACCESS_FILE, and the directory passthrough
+		// above plus the PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME identity
+		// injected at launch time is sufficient for activation.
 		if err := bindfilter.CreateSilo(syscall.Handle(job), aliasPath, realExe, bindfilter.Options{}); err != nil {
 			if verbose {
 				fmt.Printf("bindmount: appexec link %s -> %s: %v (skipped)\n", aliasPath, realExe, err)
 			}
 		} else if verbose {
 			fmt.Printf("bindmount: appexec link %s -> %s\n", aliasPath, realExe)
-		}
-
-		// Directory passthrough for the real binary's parent folder so the
-		// executable and its sibling files are reachable inside the silo even
-		// when --root has shadowed that drive.
-		if err := createPassthroughMapping(job, "appexec", filepath.Dir(realExe), mapped, verbose); err != nil {
-			return err
 		}
 	}
 	return nil
