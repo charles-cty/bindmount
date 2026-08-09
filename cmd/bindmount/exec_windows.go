@@ -306,6 +306,13 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		return nil
 	}
 
+	// Passthrough the alias directory itself so PATH-based lookup can reach
+	// the individual alias files inside it even when --root has shadowed the
+	// drive with an empty backing tree.
+	if err := createPassthroughMapping(job, "appexec", windowsAppsDir, mapped, verbose); err != nil {
+		return err
+	}
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -323,11 +330,11 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		realExe = filepath.Clean(realExe)
 
 		// File-level bind link: alias stub → real executable.
-		// This replaces the APPEXECLINK node with the actual binary inside
-		// the silo so that CreateProcess / LoadLibrary finds a real PE.
-		// Bind Filter may reject file-level virtualRoots on some builds; the
-		// error is treated as non-fatal so the directory passthrough below is
-		// always installed regardless.
+		// Replaces the APPEXECLINK reparse node with the actual binary so
+		// CreateProcess finds a real PE rather than an activation stub.
+		// Non-fatal: if the Bind Filter rejects file-level virtual roots on
+		// this build, the directory passthrough below still makes the real
+		// binary reachable by its full path.
 		if err := bindfilter.CreateSilo(syscall.Handle(job), aliasPath, realExe, bindfilter.Options{}); err != nil {
 			if verbose {
 				fmt.Printf("bindmount: appexec link %s -> %s: %v (skipped)\n", aliasPath, realExe, err)
