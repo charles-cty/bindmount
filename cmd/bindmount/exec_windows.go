@@ -313,6 +313,19 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("create root backing %s: %w", target, err)
 		}
+		// Pre-create the current profile's relative directory in the C: backing
+		// tree without installing a corresponding bind link. This preserves the
+		// normal profile directory and its NTFS short-name alias in root mode.
+		if letter == 'C' {
+			if profile := os.Getenv("USERPROFILE"); profile != "" {
+				profileRelative := strings.TrimLeft(filepath.Clean(profile)[2:], `\`)
+				if profileRelative != "" {
+					if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
+						return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
+					}
+				}
+			}
+		}
 		if mapped[strings.ToLower(root)] {
 			continue
 		}
