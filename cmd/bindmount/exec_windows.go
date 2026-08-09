@@ -191,7 +191,7 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	exitCode, err := runInSilo(job, cmdArgs, detach)
+	exitCode, err := runInSilo(job, cmdArgs, detach, resolvePackageName(cmdArgs))
 	if err != nil {
 		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
 		// on build 26100 with ERROR_INVALID_PARAMETER for a silo job), fall
@@ -485,6 +485,34 @@ func splitLinkSpec(s string) (root, target string, readOnly, merged, ok bool) {
 		return "", "", false, false, false
 	}
 	return root, s[separatorIndex+len(separator):], readOnly, merged, true
+}
+
+// resolvePackageName looks up cmdArgs[0] in PATH and, if it resolves to an
+// App Execution Alias under WindowsApps, returns its MSIX package full name
+// for use with PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME. Returns empty string
+// if the command is not a packaged app or the alias cannot be read.
+func resolvePackageName(cmdArgs []string) string {
+	if len(cmdArgs) == 0 {
+		return ""
+	}
+	resolved, err := osExec.LookPath(cmdArgs[0])
+	if err != nil {
+		return ""
+	}
+	resolved = filepath.Clean(resolved)
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		return ""
+	}
+	windowsAppsDir := strings.ToLower(filepath.Join(localAppData, "Microsoft", "WindowsApps"))
+	if !strings.HasPrefix(strings.ToLower(resolved), windowsAppsDir) {
+		return ""
+	}
+	info, err := winapi.ReadAppExecLinkInfo(resolved)
+	if err != nil || info == nil {
+		return ""
+	}
+	return info.PackageFullName
 }
 
 func createSiloLink(job syscall.Handle, l linkSpec, mapped map[string]bool, verbose bool) error {

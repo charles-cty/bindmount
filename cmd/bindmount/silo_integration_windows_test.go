@@ -82,7 +82,7 @@ func TestSiloScopedBindLinkIntegration(t *testing.T) {
 
 	probePath := filepath.Join(virtualRoot, name)
 	probe := "if ((Get-Content -Raw -LiteralPath '" + strings.ReplaceAll(probePath, "'", "''") + "').Trim() -ne 'backing') { exit 1 }"
-	exitCode, err := runInSilo(job, []string{"pwsh.exe", "-Command", probe}, false)
+	exitCode, err := runInSilo(job, []string{"pwsh.exe", "-Command", probe}, false, "")
 	if err != nil {
 		// Silo job-list attributes are rejected on some Windows builds; use
 		// the same suspended-create fallback as cmdExec in that case.

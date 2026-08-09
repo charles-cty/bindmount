@@ -44,6 +44,15 @@ func AssignProcessToJob(job, process Handle) error       { return errENOSYS }
 // ReadAppExecLink stub — APPEXECLINK reparse points only exist on Windows.
 func ReadAppExecLink(_ string) (string, error) { return "", errENOSYS }
 
+// AppExecLinkInfo stub.
+type AppExecLinkInfo struct {
+	PackageFullName string
+	ExePath         string
+}
+
+// ReadAppExecLinkInfo stub.
+func ReadAppExecLinkInfo(_ string) (*AppExecLinkInfo, error) { return nil, errENOSYS }
+
 var errENOSYS = errorString("function not implemented on this platform")
 
 type errorString string

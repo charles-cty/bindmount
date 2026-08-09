@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -40,24 +41,36 @@ func inheritStandardHandles(si *syscall.StartupInfo) {
 // runInSilo launches cmdArgs[0] inside the silo job using
 // PROC_THREAD_ATTRIBUTE_JOB_LIST, waits for it, and returns its exit code.
 //
+// If packageName is non-empty, PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME is
+// also set, giving the process the package identity required by Desktop
+// Bridge (MSIX-packaged Win32) applications such as winget.
+//
 // On build 26100 this fails with ERROR_INVALID_PARAMETER when the attribute
 // references a silo job (hcsshim hits the same wall for job containers and
 // uses the same suspended-create + assign fallback as runInSiloFallback
 // below). The attribute path is tried first because it avoids the
 // create-then-assign window entirely.
-func runInSilo(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error) {
+func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName string) (uint32, error) {
 	cmdArgs = injectPowerShellNoHistory(cmdArgs)
 	// Build the command line. CreateProcess requires a mutable buffer; the
 	// quoting rule follows the CRT/CommandLineToArgvW convention.
 	cmdLine := buildCommandLine(cmdArgs)
 
+	// Number of attributes: always the job list, plus package name when given.
+	attrCount := uint32(1)
+	var pkgName16 []uint16
+	if packageName != "" {
+		attrCount = 2
+		pkgName16 = syscall.StringToUTF16(packageName) // includes null terminator
+	}
+
 	var attrSize uintptr
-	winapi.InitializeProcThreadAttributeList(nil, 1, 0, &attrSize)
+	winapi.InitializeProcThreadAttributeList(nil, attrCount, 0, &attrSize)
 	if attrSize == 0 {
 		return 0, errors.New("InitializeProcThreadAttributeList reported zero size")
 	}
 	attrList := winapi.ProcThreadAttributeList(make([]byte, attrSize))
-	if err := winapi.InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize); err != nil {
+	if err := winapi.InitializeProcThreadAttributeList(attrList, attrCount, 0, &attrSize); err != nil {
 		return 0, fmt.Errorf("InitializeProcThreadAttributeList: %w", err)
 	}
 	defer winapi.DeleteProcThreadAttributeList(attrList)
@@ -71,6 +84,19 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error
 		unsafe.Sizeof(jobHandle),
 	); err != nil {
 		return 0, fmt.Errorf("UpdateProcThreadAttribute(JOB_LIST): %w", err)
+	}
+
+	if len(pkgName16) > 0 {
+		if err := winapi.UpdateProcThreadAttribute(
+			attrList,
+			0,
+			winapi.PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME,
+			unsafe.Pointer(&pkgName16[0]),
+			uintptr(len(pkgName16))*2,
+		); err != nil {
+			// Non-fatal: log and continue without package identity.
+			fmt.Fprintf(os.Stderr, "bindmount: PACKAGE_FULL_NAME attribute not set (%v); app may fail to activate\n", err)
+		}
 	}
 
 	var si winapi.StartupInfoEx

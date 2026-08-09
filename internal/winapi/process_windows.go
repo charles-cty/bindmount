@@ -25,6 +25,11 @@ import (
 //	=> 13 | 0x00020000 = 0x0002000D
 const PROC_THREAD_ATTRIBUTE_JOB_LIST = 13 | 0x00020000
 
+// PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME sets the package full name on the
+// launched process, giving it the package identity needed by Desktop Bridge
+// (MSIX-packaged Win32) applications. Value 29, Input=TRUE, Thread=FALSE.
+const PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME = 29 | 0x00020000
+
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 
 var (

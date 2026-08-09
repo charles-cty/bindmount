@@ -50,23 +50,22 @@ const (
 	appExecLinkExeStringIdx  = 2  // index of the executable path in the list
 )
 
-// ReadAppExecLink opens path with FILE_FLAG_OPEN_REPARSE_POINT and reads its
-// APPEXECLINK reparse data. It returns the real executable path encoded as
-// string index 2 in the reparse payload.
-//
-// The caller should treat a non-nil error as "not an APPEXECLINK or
-// unreadable"; all such files can be safely skipped when building the alias
-// map.
-func ReadAppExecLink(path string) (string, error) {
+// AppExecLinkInfo holds the decoded payload of an APPEXECLINK reparse point.
+type AppExecLinkInfo struct {
+	PackageFullName string // string[0]: e.g. "Microsoft.DesktopAppInstaller_1.29.280.0_x64__8wekyb3d8bbwe"
+	ExePath         string // string[2]: real executable path
+}
+
+// ReadAppExecLinkInfo reads the full APPEXECLINK reparse data from path and
+// returns the package full name (string[0]) and real executable path (string[2]).
+func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 	p16, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Open without following the reparse point so we get the alias node.
 	h, err := syscall.CreateFile(
 		p16,
-		0, // no data access; IOCTL only
+		0,
 		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
 		nil,
 		syscall.OPEN_EXISTING,
@@ -74,7 +73,7 @@ func ReadAppExecLink(path string) (string, error) {
 		0,
 	)
 	if err != nil {
-		return "", fmt.Errorf("open reparse point %q: %w", path, err)
+		return nil, fmt.Errorf("open reparse point %q: %w", path, err)
 	}
 	defer syscall.CloseHandle(h)
 
@@ -88,33 +87,48 @@ func ReadAppExecLink(path string) (string, error) {
 		&returned, nil,
 	)
 	if err != nil {
-		return "", fmt.Errorf("FSCTL_GET_REPARSE_POINT on %q: %w", path, err)
+		return nil, fmt.Errorf("FSCTL_GET_REPARSE_POINT on %q: %w", path, err)
 	}
 	if returned < appExecLinkStringsOffset {
-		return "", fmt.Errorf("%q: reparse buffer too small (%d bytes)", path, returned)
+		return nil, fmt.Errorf("%q: reparse buffer too small (%d bytes)", path, returned)
 	}
-
 	tag := binary.LittleEndian.Uint32(buf[0:4])
 	if tag != ioReparseTagAppExecLink {
-		return "", fmt.Errorf("%q: reparse tag 0x%08X is not APPEXECLINK", path, tag)
+		return nil, fmt.Errorf("%q: reparse tag 0x%08X is not APPEXECLINK", path, tag)
 	}
-
 	count := binary.LittleEndian.Uint32(buf[appExecLinkCountOffset : appExecLinkCountOffset+4])
 	if count <= appExecLinkExeStringIdx {
-		return "", fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
+		return nil, fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
 			path, count, appExecLinkExeStringIdx+1)
 	}
 
-	return parseAppExecLinkStrings(buf[appExecLinkStringsOffset:returned], count, appExecLinkExeStringIdx)
+	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffset:returned], count)
+	if err != nil {
+		return nil, err
+	}
+	return &AppExecLinkInfo{
+		PackageFullName: strings[0],
+		ExePath:         strings[appExecLinkExeStringIdx],
+	}, nil
 }
 
-// parseAppExecLinkStrings walks the null-terminated UTF-16LE string list
-// starting at data and returns the string at targetIdx.
-func parseAppExecLinkStrings(data []byte, count uint32, targetIdx int) (string, error) {
+// ReadAppExecLink is a convenience wrapper that returns only the real
+// executable path (string[2]) from an APPEXECLINK reparse point.
+func ReadAppExecLink(path string) (string, error) {
+	info, err := ReadAppExecLinkInfo(path)
+	if err != nil {
+		return "", err
+	}
+	return info.ExePath, nil
+}
+
+// parseAllAppExecLinkStrings decodes all null-terminated UTF-16LE strings
+// from the APPEXECLINK string payload and returns them as a slice.
+func parseAllAppExecLinkStrings(data []byte, count uint32) ([]string, error) {
+	out := make([]string, 0, count)
 	pos := 0
-	for i := 0; i < int(count); i++ {
-		// Find the UTF-16 null terminator (two consecutive zero bytes,
-		// aligned to a 2-byte boundary from pos).
+	for i := uint32(0); i < count; i++ {
+		// Scan forward two bytes at a time looking for a UTF-16 null terminator.
 		end := pos
 		for end+1 < len(data) {
 			if data[end] == 0 && data[end+1] == 0 {
@@ -122,25 +136,18 @@ func parseAppExecLinkStrings(data []byte, count uint32, targetIdx int) (string, 
 			}
 			end += 2
 		}
-		if end+1 >= len(data) && !(data[end] == 0 && data[end+1] == 0) {
-			return "", fmt.Errorf("unterminated string %d in APPEXECLINK data", i)
+		// If end+1 is out of range the null terminator was never found.
+		if end+1 >= len(data) {
+			return nil, fmt.Errorf("unterminated string %d in APPEXECLINK data", i)
 		}
-
-		if i == targetIdx {
-			length := (end - pos) / 2
-			units := make([]uint16, length)
-			for k := range units {
-				units[k] = binary.LittleEndian.Uint16(data[pos+k*2:])
-			}
-			return string(utf16.Decode(units)), nil
+		length := (end - pos) / 2
+		units := make([]uint16, length)
+		for k := range units {
+			units[k] = binary.LittleEndian.Uint16(data[pos+k*2:])
 		}
-
-		// Advance past the null terminator (2 bytes).
-		pos = end + 2
-		if pos > len(data) {
-			return "", fmt.Errorf("APPEXECLINK string list truncated at index %d", i)
-		}
+		out = append(out, string(utf16.Decode(units)))
+		pos = end + 2 // skip past the null terminator
 	}
-	return "", fmt.Errorf("target string index %d not reached in APPEXECLINK data", targetIdx)
+	return out, nil
 }
 
