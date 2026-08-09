@@ -103,10 +103,23 @@ function Run-Action([scriptblock]$action) {
     }
 }
 
+$currentWorkingDirectory = (Get-Location).Path
+$gitRepositoryRoot = $null
+try {
+    $gitRepositoryRoot = (& git -C $currentWorkingDirectory rev-parse --show-toplevel 2>$null | Out-String).Trim()
+    if ($gitRepositoryRoot) {
+        $gitRepositoryRoot = [IO.Path]::GetFullPath($gitRepositoryRoot)
+    } else {
+        $gitRepositoryRoot = $null
+    }
+} catch {
+    $gitRepositoryRoot = $null
+}
+
 $form = New-Object Windows.Forms.Form
 $form.Text = 'bindmount - Bind Filter and Job Silo Manager'
-$form.Size = New-Object Drawing.Size(980, 720)
-$form.MinimumSize = New-Object Drawing.Size(700, 500)
+$form.Size = New-Object Drawing.Size(940, 700)
+$form.MinimumSize = New-Object Drawing.Size(680, 500)
 $form.StartPosition = 'CenterScreen'
 
 $tabs = New-Object Windows.Forms.TabControl
@@ -121,7 +134,7 @@ $execTab = New-Object Windows.Forms.TabPage
 $execTab.Text = 'Create / run silo'
 $siloTab = New-Object Windows.Forms.TabPage
 $siloTab.Text = 'Silo management'
-$tabs.TabPages.AddRange(@($listTab, $addTab, $removeTab, $execTab, $siloTab))
+$tabs.TabPages.AddRange(@($execTab, $siloTab, $listTab, $addTab, $removeTab))
 $form.Controls.Add($tabs)
 
 $resultBox = New-Object Windows.Forms.TextBox
@@ -131,7 +144,7 @@ $resultBox.ScrollBars = 'Both'
 $resultBox.WordWrap = $false
 $resultBox.Font = New-Object Drawing.Font('Consolas', 10)
 $resultBox.Dock = 'Bottom'
-$resultBox.Height = 230
+$resultBox.Height = 100
 $form.Controls.Add($resultBox)
 
 # Mappings tab
@@ -277,22 +290,22 @@ $execPassthrough.AutoSize = $true
 $execTab.Controls.Add($execPassthrough)
 $execPathPassthrough = New-Object Windows.Forms.CheckBox
 $execPathPassthrough.Text = 'Passthrough PATH directories'
-$execPathPassthrough.Location = New-Object Drawing.Point(20, 360)
+$execPathPassthrough.Location = New-Object Drawing.Point(360, 335)
 $execPathPassthrough.AutoSize = $true
 $execTab.Controls.Add($execPathPassthrough)
 $execCwdPassthrough = New-Object Windows.Forms.CheckBox
 $execCwdPassthrough.Text = 'Passthrough current directory'
-$execCwdPassthrough.Location = New-Object Drawing.Point(20, 385)
+$execCwdPassthrough.Location = New-Object Drawing.Point(20, 360)
 $execCwdPassthrough.AutoSize = $true
 $execTab.Controls.Add($execCwdPassthrough)
 $execAppStatePassthrough = New-Object Windows.Forms.CheckBox
 $execAppStatePassthrough.Text = 'Passthrough APPDATA, LOCALAPPDATA, and C:\ProgramData'
-$execAppStatePassthrough.Location = New-Object Drawing.Point(20, 410)
+$execAppStatePassthrough.Location = New-Object Drawing.Point(360, 360)
 $execAppStatePassthrough.AutoSize = $true
 $execTab.Controls.Add($execAppStatePassthrough)
 $execGitRootPassthrough = New-Object Windows.Forms.CheckBox
 $execGitRootPassthrough.Text = 'Passthrough Git repository root'
-$execGitRootPassthrough.Location = New-Object Drawing.Point(20, 435)
+$execGitRootPassthrough.Location = New-Object Drawing.Point(20, 385)
 $execGitRootPassthrough.AutoSize = $true
 $execTab.Controls.Add($execGitRootPassthrough)
 $execRoot.Add_CheckedChanged({
@@ -303,6 +316,14 @@ $execRoot.Add_CheckedChanged({
         $execGitRootPassthrough.Checked = $true
     }
 })
+Add-Label $execTab 'Current working directory:' 20 415
+$execWorkingDirectory = Add-TextBox $execTab 180 411 660
+$execWorkingDirectory.Text = $currentWorkingDirectory
+$execWorkingDirectory.ReadOnly = $true
+Add-Label $execTab 'Git repository root:' 20 440
+$execGitRepositoryRoot = Add-TextBox $execTab 180 436 660
+$execGitRepositoryRoot.Text = if ($gitRepositoryRoot) { $gitRepositoryRoot } else { '(none detected)' }
+$execGitRepositoryRoot.ReadOnly = $true
 $execButton = Add-Button $execTab 'Create silo and run command' 20 470
 $execButton.Add_Click({
     Run-Action {
