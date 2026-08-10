@@ -38,6 +38,34 @@ $cli = Join-Path $PSScriptRoot 'bindmount.exe'
 if (-not (Test-Path -LiteralPath $cli)) {
 	$cli = Join-Path $PSScriptRoot '..\dist\bindmount.exe'
 }
+$decoyExe = Join-Path (Split-Path -Parent $cli) 'decoy.exe'
+
+# Well-known wsl.exe install locations. The "Block WSL" option redirects any
+# of these that exist on the host to decoy.exe via file-level bind links.
+$script:wslExeCandidates = @(
+    (Join-Path ${env:ProgramFiles} 'WSL\wsl.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wsl.exe')
+)
+$windowsAppsRoot = Join-Path ${env:ProgramFiles} 'WindowsApps'
+if (Test-Path -LiteralPath $windowsAppsRoot) {
+    $wslPackageDirs = Get-ChildItem -LiteralPath $windowsAppsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'MicrosoftCorporationII.WindowsSubsystemForLinux_*' }
+    foreach ($packageDir in $wslPackageDirs) {
+        $script:wslExeCandidates += (Join-Path $packageDir.FullName 'wsl.exe')
+    }
+}
+
+function Get-ExistingWslExePaths {
+    $seen = @{}
+    $paths = @()
+    foreach ($candidate in $script:wslExeCandidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate) -and -not $seen.ContainsKey($candidate.ToLowerInvariant())) {
+            $seen[$candidate.ToLowerInvariant()] = $true
+            $paths += $candidate
+        }
+    }
+    return $paths
+}
 
 function Invoke-Bindmount([string[]]$Arguments) {
     if (-not (Test-Path -LiteralPath $cli)) {
@@ -269,7 +297,7 @@ $execArgs.ScrollBars = 'Vertical'
 $execArgs.Location = New-Object Drawing.Point(180, 101)
 $execArgs.Size = New-Object Drawing.Size(660, 60)
 $execTab.Controls.Add($execArgs)
-Add-Label $execTab 'Links (root=target, root==target read-only, root+=target merged):' 20 175
+Add-Label $execTab 'Links (root=target, root==target read-only, root+=target merged, root+==target both):' 20 175
 $execLinks = New-Object Windows.Forms.TextBox
 $execLinks.Multiline = $true
 $execLinks.ScrollBars = 'Vertical'
@@ -326,62 +354,110 @@ $execRoot.Add_CheckedChanged({
         $execCwdPassthrough.Checked = $true
         $execGitRootPassthrough.Checked = $true
         $execAppExecPassthrough.Checked = $true
+        $execBlockWsl.Checked = $true
     }
 })
-Add-Label $execTab 'Current working directory:' 20 415
-$execWorkingDirectory = Add-TextBox $execTab 180 411 660
+$execBlockWsl = New-Object Windows.Forms.CheckBox
+$execBlockWsl.Text = 'Block WSL (redirect wsl.exe to decoy)'
+$execBlockWsl.Location = New-Object Drawing.Point(20, 410)
+$execBlockWsl.AutoSize = $true
+$execTab.Controls.Add($execBlockWsl)
+Add-Label $execTab 'Current working directory:' 20 440
+$execWorkingDirectory = Add-TextBox $execTab 180 436 660
 $execWorkingDirectory.Text = $currentWorkingDirectory
 $execWorkingDirectory.ReadOnly = $true
-Add-Label $execTab 'Git repository root:' 20 440
-$execGitRepositoryRoot = Add-TextBox $execTab 180 436 660
+Add-Label $execTab 'Git repository root:' 20 465
+$execGitRepositoryRoot = Add-TextBox $execTab 180 461 660
 $execGitRepositoryRoot.Text = if ($gitRepositoryRoot) { $gitRepositoryRoot } else { '(none detected)' }
 $execGitRepositoryRoot.ReadOnly = $true
-$execButton = Add-Button $execTab 'Create silo and run command' 20 470
+# Build the argument list for bindmount exec from the current GUI state.
+# Silo name and command validity are checked by the callers that need them.
+function Get-ExecArguments {
+    $arguments = @('exec', '--detach')
+    if ($execRoot.Checked) {
+        if (-not $execRootDir.Text) { throw 'Enter a root backing directory.' }
+        $arguments += @('--root', $execRootDir.Text)
+    }
+    if ($execPassthrough.Checked) {
+        $arguments += @('--passthrough', 'executable')
+    } elseif ($execRoot.Checked) {
+        $arguments += @('--no-passthrough', 'executable')
+    }
+    foreach ($option in @(
+        @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
+        @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
+        @{ Checked = $execGitRootPassthrough.Checked; Name = 'gitroot' },
+        @{ Checked = $execAppExecPassthrough.Checked; Name = 'appexec' },
+        @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' }
+    )) {
+        if ($option.Checked) {
+            $arguments += @('--passthrough', $option.Name)
+        } elseif ($execRoot.Checked) {
+            $arguments += @('--no-passthrough', $option.Name)
+        }
+    }
+    $hasWindowsRoot = $false
+    foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {
+        $link = $line.Trim()
+        $arguments += @('--link', $link)
+        if ($link -match '(?i)^C:\\(?:Windows(?:\\|=)|=)') {
+            $hasWindowsRoot = $true
+        }
+    }
+    if ($execBlockWsl.Checked) {
+        # Block WSL launches inside the silo by redirecting every wsl.exe
+        # found on the host to the decoy, which prints an explanatory error
+        # instead of launching WSL. Links are file-level so wsl.exe is
+        # shadowed even when its parent directory is passed through.
+        # Execution aliases under WindowsApps are 0-byte APPEXECLINK reparse
+        # points the driver cannot map; bindmount renames those aside itself
+        # (wsl.exe.bindmount-blocked), keeping the rename in --detach mode so
+        # the block persists. Already-blocked aliases are skipped.
+        $wslPaths = Get-ExistingWslExePaths
+        if ($wslPaths.Count -gt 0) {
+            if (-not (Test-Path -LiteralPath $decoyExe)) {
+                throw "Block WSL requires decoy.exe next to bindmount.exe: $decoyExe"
+            }
+            foreach ($wslPath in $wslPaths) {
+                $item = Get-Item -LiteralPath $wslPath -Force
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                    (Test-Path -LiteralPath "$wslPath.bindmount-blocked")) {
+                    continue
+                }
+                $arguments += @('--link', "$wslPath==$decoyExe")
+            }
+        }
+    }
+    if ($execWindows.Checked -and -not $hasWindowsRoot) {
+        # Install user links first. A broader C:\ mapping must precede
+        # C:\Windows; if the user supplied C:\ itself, omit this default
+        # because the broader mapping owns that subtree.
+        $arguments += @('--link', 'C:\Windows=C:\Windows')
+    }
+    $arguments += @($execName.Text, '--', $execCommand.Text)
+    $arguments += @($execArgs.Lines | Where-Object { $_.Trim() })
+    return ,$arguments
+}
+
+$execButton = Add-Button $execTab 'Create silo and run command' 20 495
 $execButton.Add_Click({
     Run-Action {
         if (-not $execName.Text -or -not $execCommand.Text) {
             throw 'Enter a silo name and command.'
         }
-        $arguments = @('exec', '--detach')
-        if ($execRoot.Checked) {
-            if (-not $execRootDir.Text) { throw 'Enter a root backing directory.' }
-            $arguments += @('--root', $execRootDir.Text)
-        }
-        if ($execPassthrough.Checked) {
-            $arguments += @('--passthrough', 'executable')
-        } elseif ($execRoot.Checked) {
-            $arguments += @('--no-passthrough', 'executable')
-        }
-        foreach ($option in @(
-            @{ Checked = $execPathPassthrough.Checked; Name = 'path' },
-            @{ Checked = $execCwdPassthrough.Checked; Name = 'cwd' },
-            @{ Checked = $execGitRootPassthrough.Checked; Name = 'gitroot' },
-            @{ Checked = $execAppExecPassthrough.Checked; Name = 'appexec' },
-            @{ Checked = $execAppStatePassthrough.Checked; Name = 'appstate' }
-        )) {
-            if ($option.Checked) {
-                $arguments += @('--passthrough', $option.Name)
-            } elseif ($execRoot.Checked) {
-                $arguments += @('--no-passthrough', $option.Name)
-            }
-        }
-        $hasWindowsRoot = $false
-        foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {
-            $link = $line.Trim()
-            $arguments += @('--link', $link)
-            if ($link -match '(?i)^C:\\(?:Windows(?:\\|=)|=)') {
-                $hasWindowsRoot = $true
-            }
-        }
-        if ($execWindows.Checked -and -not $hasWindowsRoot) {
-            # Install user links first. A broader C:\ mapping must precede
-            # C:\Windows; if the user supplied C:\ itself, omit this default
-            # because the broader mapping owns that subtree.
-            $arguments += @('--link', 'C:\Windows=C:\Windows')
-        }
-        $arguments += @($execName.Text, '--', $execCommand.Text)
-        $arguments += @($execArgs.Lines | Where-Object { $_.Trim() })
-        Start-Bindmount $arguments
+        # bindmount itself renames app execution aliases aside (the driver
+        # cannot anchor a mapping on them), keeping the rename in --detach
+        # mode so the block persists. Nothing extra to do here.
+        Start-Bindmount (Get-ExecArguments)
+    }
+})
+$execCopyButton = Add-Button $execTab 'Copy command' 250 495
+$execCopyButton.Add_Click({
+    Run-Action {
+        $arguments = Get-ExecArguments
+        $commandLine = "`"$cli`" " + (($arguments | ForEach-Object { Quote-ProcessArgument $_ }) -join ' ')
+        [Windows.Forms.Clipboard]::SetText($commandLine)
+        "Copied to clipboard:`r`n$commandLine"
     }
 })
 

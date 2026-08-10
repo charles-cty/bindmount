@@ -37,6 +37,15 @@ func validPassthroughName(name string) bool {
 //
 //	bindmount exec --link C:\app\data=D:\shared\data --link C:\app\cfg==D:\cfg-ro mysilo -- cmd.exe /c dir C:\app\data
 func cmdExec(args []string) error {
+	return cmdExecInner(args)
+}
+
+// execRestores holds renamed app execution aliases pending restoration. Set
+// by createSiloLink; restored by cmdExecInner when an attached run exits.
+// Detached runs keep the rename so the block persists.
+var execRestores []aliasRestore
+
+func cmdExecInner(args []string) (err error) {
 	// Split at "--": before it are our flags, after it the command.
 	var ourArgs, cmdArgs []string
 	for i, a := range args {
@@ -190,7 +199,6 @@ func cmdExec(args []string) error {
 			return err
 		}
 	}
-
 	exitCode, err := runInSilo(job, cmdArgs, detach, "")
 	if err != nil {
 		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
@@ -201,10 +209,20 @@ func cmdExec(args []string) error {
 			return err
 		}
 	}
-	// Propagate the child's exit code directly rather than wrapping it as an
-	// error, so `bindmount exec` is transparent in scripts.
+	// Restore renamed app execution aliases before propagating the exit code.
+	// Detached runs keep the rename (the block is meant to outlive the
+	// supervisor), so only restore for attached runs; exitWith calls os.Exit,
+	// which skips deferred functions.
 	if !detach && exitCode != 0 {
+		if execRestores != nil {
+			restoreAliases(execRestores)
+			execRestores = nil
+		}
 		exitWith(exitCode)
+	}
+	if !detach && execRestores != nil {
+		restoreAliases(execRestores)
+		execRestores = nil
 	}
 	return nil
 }
@@ -497,6 +515,31 @@ func splitLinkSpec(s string) (root, target string, readOnly, merged, ok bool) {
 	return root, s[separatorIndex+len(separator):], readOnly, merged, true
 }
 
+// isAppExecAlias reports whether path is an app execution alias: a 0-byte
+// file carrying an APPEXECLINK reparse point, as found under
+// %LOCALAPPDATA%\Microsoft\WindowsApps.
+func isAppExecAlias(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || info.Size() != 0 || info.IsDir() {
+		return false
+	}
+	_, err = winapi.ReadAppExecLinkInfo(path)
+	return err == nil
+}
+
+// restoreAliases renames blocked app execution aliases back to their
+// original names, best-effort. Aliases renamed by other means (a GUI
+// restore, or a tool crash before this ran) are recreated by Windows when
+// the owning app is reinstalled or updated; they can also be renamed back by
+// removing the ".bindmount-blocked" suffix.
+func restoreAliases(restores []aliasRestore) {
+	for i := len(restores) - 1; i >= 0; i-- {
+		if err := os.Rename(restores[i].from, restores[i].to); err != nil {
+			fmt.Fprintf(os.Stderr, "bindmount: restore alias %s: %v\n", restores[i].to, err)
+		}
+	}
+}
+
 // resolvePackageName looks up cmdArgs[0] in PATH and, if it resolves to an
 // App Execution Alias under WindowsApps, returns its MSIX package full name
 // for use with PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME. Returns empty string
@@ -525,15 +568,50 @@ func resolvePackageName(cmdArgs []string) string {
 	return info.PackageFullName
 }
 
+// aliasRestore records a renamed app execution alias so exec can put it back
+// when the launched command exits.
+type aliasRestore struct {
+	from, to string
+}
+
 func createSiloLink(job syscall.Handle, l linkSpec, mapped map[string]bool, verbose bool) error {
 	key := strings.ToLower(filepath.Clean(l.root))
 	if mapped[key] {
 		return nil
 	}
+	// Anchoring a mapping on an app execution alias (0-byte APPEXECLINK
+	// reparse point, e.g. the wsl.exe alias under WindowsApps) fails with
+	// "The file cannot be accessed by the system". A bind link cannot shadow
+	// such an alias; rename it aside instead so the shell reports the command
+	// as not found.
+	info, err := os.Lstat(l.root)
+	if err == nil && info.Size() == 0 && !info.IsDir() {
+		if _, err := winapi.ReadAppExecLinkInfo(l.root); err == nil {
+			// A regular 0-byte file has no reparse data; only an app
+			// execution alias parses as APPEXECLINK. The rename is
+			// permanent: the alias is restored only for attached runs,
+			// and Windows recreates it on app reinstall/update.
+			blocked := l.root + ".bindmount-blocked"
+			if _, err := os.Stat(blocked); err == nil {
+				if err := os.Remove(blocked); err != nil {
+					return fmt.Errorf("remove stale blocked alias %s: %w", blocked, err)
+				}
+			}
+			if err := os.Rename(l.root, blocked); err != nil {
+				return fmt.Errorf("block app execution alias %s: %w", l.root, err)
+			}
+			execRestores = append(execRestores, aliasRestore{from: blocked, to: l.root})
+			if verbose {
+				fmt.Printf("bindmount: renamed app execution alias %s -> %s\n", l.root, blocked)
+			}
+			mapped[key] = true
+			return nil
+		}
+	}
 	opts := bindfilter.Options{ReadOnly: l.readOnly, Merged: l.merged}
-	err := bindfilter.CreateSilo(job, l.root, l.target, opts)
-	if err != nil {
-		return fmt.Errorf("create silo link %s -> %s: %w", l.root, l.target, err)
+	err2 := bindfilter.CreateSilo(job, l.root, l.target, opts)
+	if err2 != nil {
+		return fmt.Errorf("create silo link %s -> %s: %w", l.root, l.target, err2)
 	}
 	if verbose {
 		fmt.Printf("bindmount: mapping user %s -> %s\n", l.root, l.target)

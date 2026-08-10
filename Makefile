@@ -12,6 +12,7 @@ build:
 	rm -rf $(DIST)
 	mkdir -p $(DIST)
 	$(GOFLAGS) $(GO) build -o $(DIST)/bindmount.exe ./cmd/bindmount
+	$(GOFLAGS) $(GO) build -o $(DIST)/decoy.exe ./cmd/decoy
 	cp scripts/bindmount-gui.ps1 $(DIST)/bindmount-gui.ps1
 
 # Compile the Windows test binaries without running them (we're cross-compiling);

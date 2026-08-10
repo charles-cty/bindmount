@@ -48,7 +48,10 @@ if (-not $Test -and -not $Vet -or $Release) {
     $oldGoARCH = $env:GOARCH
     $env:GOOS = 'windows'
     $env:GOARCH = 'amd64'
-    try { Invoke-Go @('build', '-o', (Join-Path $dist 'bindmount.exe'), './cmd/bindmount') }
+    try {
+        Invoke-Go @('build', '-o', (Join-Path $dist 'bindmount.exe'), './cmd/bindmount')
+        Invoke-Go @('build', '-o', (Join-Path $dist 'decoy.exe'), './cmd/decoy')
+    }
     finally {
         $env:GOOS = $oldGoOS
         $env:GOARCH = $oldGoARCH

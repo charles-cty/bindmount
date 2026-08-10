@@ -56,7 +56,7 @@ func main() {
 }
 
 func newRootCommand() *cobra.Command {
-	root := &cobra.Command{Use: "bindmount", SilenceUsage: true}
+	root := &cobra.Command{Use: "bindmount", SilenceUsage: true, SilenceErrors: true}
 	root.AddCommand(newAddCommand(), newRemoveCommand(), newListCommand(), newExecCommand())
 	root.AddCommand(newSiloCommand())
 	return root
