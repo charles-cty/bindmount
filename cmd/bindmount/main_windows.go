@@ -107,7 +107,12 @@ func newExecCommand() *cobra.Command {
 	// exec has a command payload after `--`; leave that payload untouched so
 	// Cobra does not try to interpret the child command's own flags.
 	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", Short: "create a Job Silo and launch a command", Long: "Create a named Job Silo, optionally install root and scoped mappings, and launch a command inside it. With --root, executable, PATH, current-directory, and Git-root passthrough are enabled by default; appstate passthrough is opt-in. Disable individual types with --no-passthrough <name>.", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
+		// Only treat -h/--help as a help request when it appears before the
+		// "--" separator; after it the payload belongs to the child command.
 		for _, arg := range args {
+			if arg == "--" {
+				break
+			}
 			if arg == "-h" || arg == "--help" {
 				fmt.Println("usage: " + execUsage)
 				return nil

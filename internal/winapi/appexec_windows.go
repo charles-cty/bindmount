@@ -35,24 +35,31 @@ const (
 //	[0:4]   ULONG  ReparseTag        = 0x8000001B
 //	[4:6]   USHORT ReparseDataLength
 //	[6:8]   USHORT Reserved
-//	[8:12]  ULONG  Version           (always 3 in practice)
-//	[12:16] ULONG  StringCount       (typically 4)
-//	[16:…]  null-terminated UTF-16LE strings, concatenated:
+//	[8:12]  ULONG  Version           (only when the header is present)
+//	[12:16] ULONG  StringCount       (only when the header is present)
+//	[12… or 16…]  null-terminated UTF-16LE strings, concatenated:
 //	          [0] Package family name (for activation)
 //	          [1] Entry point (AppUserModelId)
 //	          [2] Executable path        ← the value we want
 //	          [3] Application type flag  ("0" for regular UWP)
 //
-// The StringCount field is occasionally observed to contain garbage (the
-// first bytes of string[0]) on build 26100, so the parser does not trust it:
-// it scans the payload for null-terminated strings by shape and stops at the
-// first unterminated or empty entry.
+// On build 26100 the observed buffer carries no Version/StringCount header
+// at all: the string payload begins at offset 12, immediately after
+// ReparseTag+ReparseDataLength+Reserved. The bytes at [12:16] that older
+// documentation calls StringCount are actually the first characters of
+// string[0] ("M","i" read as a uint32). The parser therefore does not trust
+// a fixed offset or a count; it scans for the string list by shape, starting
+// at offset 12, and falls back to offset 16 for layouts that do carry the
+// 8-byte version+count header.
 const (
-	appExecLinkHeaderSize    = 8  // ReparseTag + ReparseDataLength + Reserved
-	appExecLinkVersionOffset = 8  // Version field
-	appExecLinkCountOffset   = 12 // StringCount field
-	appExecLinkStringsOffset = 16 // start of the string payload
-	appExecLinkExeStringIdx  = 2  // index of the executable path in the list
+	appExecLinkHeaderSize = 8 // ReparseTag + ReparseDataLength + Reserved
+	// appExecLinkStringsOffsetV3 is where the string list begins on the
+	// build-26100 layout (no version/count header).
+	appExecLinkStringsOffsetV3 = 12
+	// appExecLinkStringsOffsetV1 is where it begins when the 8-byte
+	// Version+StringCount header is present.
+	appExecLinkStringsOffsetV1 = 16
+	appExecLinkExeStringIdx    = 2 // index of the executable path in the list
 )
 
 // AppExecLinkInfo holds the decoded payload of an APPEXECLINK reparse point.
@@ -94,7 +101,7 @@ func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("FSCTL_GET_REPARSE_POINT on %q: %w", path, err)
 	}
-	if returned < appExecLinkStringsOffset {
+	if returned < appExecLinkStringsOffsetV3 {
 		return nil, fmt.Errorf("%q: reparse buffer too small (%d bytes)", path, returned)
 	}
 	tag := binary.LittleEndian.Uint32(buf[0:4])
@@ -102,9 +109,13 @@ func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 		return nil, fmt.Errorf("%q: reparse tag 0x%08X is not APPEXECLINK", path, tag)
 	}
 
-	// Do not trust the StringCount field (see the layout comment above);
-	// scan the payload for null-terminated strings by shape instead.
-	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffset:returned])
+	// Scan the payload for null-terminated strings by shape, trying the
+	// headerless (offset 12) layout first and falling back to the
+	// version+count (offset 16) layout. See the layout comment above.
+	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV3:returned])
+	if err != nil || len(strings) <= appExecLinkExeStringIdx {
+		strings, err = parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV1:returned])
+	}
 	if err != nil {
 		return nil, err
 	}

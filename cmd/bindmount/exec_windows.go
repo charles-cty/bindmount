@@ -191,7 +191,7 @@ func cmdExec(args []string) error {
 		}
 	}
 
-	exitCode, err := runInSilo(job, cmdArgs, detach, resolvePackageName(cmdArgs))
+	exitCode, err := runInSilo(job, cmdArgs, detach, "")
 	if err != nil {
 		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
 		// on build 26100 with ERROR_INVALID_PARAMETER for a silo job), fall
@@ -287,10 +287,9 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 //     ensuring the executable's sibling DLLs and data files are visible to
 //     the activation path inside the silo.
 //
-//  2. A best-effort file-level link that replaces the APPEXECLINK stub with
-//     the real executable. The Bind Filter rejects file-level virtual roots
-//     that are themselves reparse points, so this usually fails and is only
-//     a fallback for builds that accept it.
+//  2. A directory passthrough for the package's per-user state folder under
+//     %LOCALAPPDATA%\Packages\<family>, so a packaged app can reach its state
+//     store (winget fails without it with 0x80073db8).
 //
 // The WindowsApps directory itself is silently skipped if it cannot be read
 // or if none of its entries carry an APPEXECLINK reparse tag; this keeps
@@ -345,19 +344,21 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 			continue
 		}
 
-		// File-level bind link: alias stub → real executable.
-		// Best-effort only: BfSetupFilter rejects a file-level virtual root
-		// whose physical node is itself a reparse point (the APPEXECLINK
-		// stub) with ERROR_CANT_ACCESS_FILE, and the directory passthrough
-		// above plus the PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME identity
-		// injected at launch time is sufficient for activation.
-		if err := bindfilter.CreateSilo(syscall.Handle(job), aliasPath, realExe, bindfilter.Options{}); err != nil {
-			if verbose {
-				fmt.Printf("bindmount: appexec link %s -> %s: %v (skipped)\n", aliasPath, realExe, err)
+		// Per-user package state folder passthrough. Packaged apps keep
+		// their writable state under %LOCALAPPDATA%\Packages\<family>; without
+		// it winget fails at startup with 0x80073db8 (state store load). The
+		// family name is string[0] of the reparse payload, carried on info.
+		if info, err := winapi.ReadAppExecLinkInfo(aliasPath); err == nil && info != nil && info.PackageFullName != "" {
+			stateDir := filepath.Join(localAppData, "Packages", info.PackageFullName)
+			if stat, err := os.Stat(stateDir); err == nil && stat.IsDir() {
+				if err := createPassthroughMapping(job, "appexec", stateDir, mapped, verbose); err != nil {
+					if verbose {
+						fmt.Printf("bindmount: appexec state %s: %v (skipped)\n", stateDir, err)
+					}
+				}
 			}
-		} else if verbose {
-			fmt.Printf("bindmount: appexec link %s -> %s\n", aliasPath, realExe)
 		}
+
 	}
 	return nil
 }
