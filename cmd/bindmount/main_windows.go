@@ -67,21 +67,30 @@ func newSiloCommand() *cobra.Command {
 	silo.AddCommand(&cobra.Command{
 		Use: "exists <name>", Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			// Named Job Objects created by the CLI use the creator's default
-			// security descriptor; request the same access used by mapping/list
-			// operations so existence checks work for those jobs.
-			// JOB_OBJECT_QUERY is sufficient for an existence check and
-			// requires fewer privileges than JOB_OBJECT_ALL_ACCESS.
-			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_QUERY)
-			if err != nil {
-				if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
-					fmt.Printf("bindmount: silo %q does not exist\n", args[0])
+			// This is an existence check, not an access check: the job must
+			// count as existing whenever it is there, even if the caller's
+			// token cannot open it. A plain name searches the caller's
+			// session namespace; "Global\" searches session 0's namespace,
+			// where silos created by an elevated process live. Try both.
+			// ERROR_ACCESS_DENIED means the open reached the object but the
+			// security descriptor rejected the access mask, which only
+			// happens when the job exists.
+			for _, name := range []string{args[0], `Global\` + args[0]} {
+				job, err := winapi.OpenJob(name, winapi.JOB_OBJECT_QUERY)
+				if err == nil {
+					syscall.CloseHandle(job)
+					fmt.Printf("bindmount: silo %q exists\n", args[0])
 					return nil
 				}
-				return fmt.Errorf("check silo %q: %w", args[0], err)
+				if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+					fmt.Printf("bindmount: silo %q exists\n", args[0])
+					return nil
+				}
+				if !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+					return fmt.Errorf("check silo %q: %w", args[0], err)
+				}
 			}
-			syscall.CloseHandle(job)
-			fmt.Printf("bindmount: silo %q exists\n", args[0])
+			fmt.Printf("bindmount: silo %q does not exist\n", args[0])
 			return nil
 		},
 	})
