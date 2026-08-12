@@ -75,7 +75,7 @@ bindmount add [--silo <job>] <virtual-root> <target>
 bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```

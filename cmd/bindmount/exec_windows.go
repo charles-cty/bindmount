@@ -15,7 +15,7 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]"
 
 func validPassthroughName(name string) bool {
 	switch name {
