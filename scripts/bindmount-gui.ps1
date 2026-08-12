@@ -40,6 +40,22 @@ if (-not (Test-Path -LiteralPath $cli)) {
 }
 $decoyExe = Join-Path (Split-Path -Parent $cli) 'decoy.exe'
 
+# Windows directory used by the "Map C:\Windows read-write" default link and
+# by the silo-launch tab's C:\ Windows removal. Derived from the environment
+# (SystemRoot / WINDIR) instead of hardcoding C:\Windows so it stays correct
+# on installs where Windows lives on another drive.
+$windowsDir = $env:SystemRoot
+if (-not $windowsDir) { $windowsDir = $env:WINDIR }
+if (-not $windowsDir) { $windowsDir = 'C:\Windows' }
+$windowsDir = $windowsDir.TrimEnd('\')
+# Link-root matcher for the Windows subtree, mirroring the original
+# '^(?i)^C:\\(?:Windows(?:\\|=)|=)' shape but derived from $windowsDir: a link
+# covers Windows if its virtual root is the Windows dir, a path under it, or
+# the drive that holds it (e.g. "C:\=...").
+$windowsLeaf = Split-Path -Leaf $windowsDir
+$windowsRootPrefix = $windowsDir.Substring(0, $windowsDir.Length - $windowsLeaf.Length)
+$windowsDirPattern = '(?i)^' + [regex]::Escape($windowsRootPrefix) + '(?:' + [regex]::Escape($windowsLeaf) + '(?:\\|=)|=)'
+
 # Resolve wsl.exe locations by scanning PATH. The WindowsApps alias
 # (%LOCALAPPDATA%\Microsoft\WindowsApps\wsl.exe) is an APPEXECLINK reparse
 # point that cannot be shadowed by a bind link, so it is skipped here; the
@@ -271,7 +287,7 @@ $addButton.Add_Click({
             # narrower default before installing the broader C:\ mapping;
             # Bind Filter rejects overlapping roots in the opposite order.
             try {
-                Invoke-Bindmount @('remove', 'C:\Windows', '--silo', $addSilo.Text) | Out-Null
+                Invoke-Bindmount @('remove', $windowsDir, '--silo', $addSilo.Text) | Out-Null
             } catch {
                 # It is fine if the default mapping was not present.
             }
@@ -452,7 +468,7 @@ function Get-ExecArguments {
     foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {
         $link = $line.Trim()
         $arguments += @('--link', $link)
-        if ($link -match '(?i)^C:\\(?:Windows(?:\\|=)|=)') {
+        if ($link -match $windowsDirPattern) {
             $hasWindowsRoot = $true
         }
     }
@@ -484,7 +500,7 @@ function Get-ExecArguments {
         # Install user links first. A broader C:\ mapping must precede
         # C:\Windows; if the user supplied C:\ itself, omit this default
         # because the broader mapping owns that subtree.
-        $arguments += @('--link', 'C:\Windows=C:\Windows')
+        $arguments += @('--link', "$windowsDir=$windowsDir")
     }
     $arguments += @($execName.Text, '--', $execCommand.Text)
     $arguments += @($execArgs.Lines | Where-Object { $_.Trim() })
