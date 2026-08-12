@@ -75,14 +75,14 @@ bindmount add [--silo <job>] <virtual-root> <target>
 bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
 
 `--root` creates a backing directory for every drive visible when the silo is
 created. It is a launch-time snapshot, not a drive hot-plug monitor. When
-When `--root` is supplied, executable, PATH, current-directory, and Git-root
+`--root` is supplied, executable, PATH, current-directory, and Git-root
 passthrough are enabled by default:
 
 - `executable` — expose the executable's containing directory.
@@ -96,6 +96,11 @@ Each passthrough is read-write and can be independently controlled with
 passthrough types are disabled unless explicitly enabled. `appstate` is
 opt-in even when `--root` is present because it exposes persistent application
 state rather than only launch-time dependencies.
+
+`--readonly-root` is mutually exclusive with `--root`. Instead of a backing
+tree it maps every currently visible drive onto the same location with a
+read-only bind link, so the silo sees the real drive contents but cannot
+write to them. Unlike `--root`, it does not change the passthrough defaults.
 
 `gitroot` uses `git rev-parse --show-toplevel`. If Git is not installed in
 `PATH`, or the current directory is not inside a Git repository, no Git-root

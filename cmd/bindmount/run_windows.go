@@ -51,7 +51,6 @@ func inheritStandardHandles(si *syscall.StartupInfo) {
 // below). The attribute path is tried first because it avoids the
 // create-then-assign window entirely.
 func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName string) (uint32, error) {
-	cmdArgs = injectPowerShellNoHistory(cmdArgs)
 	// Build the command line. CreateProcess requires a mutable buffer; the
 	// quoting rule follows the CRT/CommandLineToArgvW convention.
 	cmdLine := buildCommandLine(cmdArgs)
@@ -147,61 +146,13 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 	return exitCode, nil
 }
 
-// injectPowerShellNoHistory configures PSReadLine for pwsh launches without
-// changing the caller's command or its arguments. For an explicit -Command,
-// the configuration is prefixed to that command. Otherwise the options are
-// appended after the normal pwsh switches and an interactive session is kept
-// alive with -NoExit.
-func injectPowerShellNoHistory(args []string) []string {
-	if len(args) == 0 {
-		return args
-	}
-	commandName := args[0]
-	if slash := strings.LastIndexAny(commandName, `\\/`); slash >= 0 {
-		commandName = commandName[slash+1:]
-	}
-	if !strings.EqualFold(strings.TrimSuffix(commandName, ".exe"), "pwsh") {
-		return args
-	}
-	const setup = "Import-Module PSReadLine; Set-PSReadLineOption -HistorySaveStyle SaveNothing;"
-	for i := 1; i+1 < len(args); i++ {
-		if strings.EqualFold(args[i], "-Command") || strings.EqualFold(args[i], "-c") {
-			out := append([]string(nil), args...)
-			out[i+1] = setup + " " + out[i+1]
-			return out
-		}
-	}
-	for i := 1; i < len(args); i++ {
-		if strings.EqualFold(args[i], "-File") || strings.EqualFold(args[i], "-f") {
-			if i+1 >= len(args) {
-				return args
-			}
-			command := setup + " & " + quotePowerShell(args[i+1])
-			for _, argument := range args[i+2:] {
-				command += " " + quotePowerShell(argument)
-			}
-			out := append([]string(nil), args[:i]...)
-			return append(out, "-Command", command)
-		}
-		if strings.EqualFold(args[i], "-EncodedCommand") || strings.EqualFold(args[i], "-e") {
-			return args
-		}
-	}
-	out := append([]string(nil), args...)
-	out = append(out, "-NoExit", "-Command", setup)
-	return out
-}
 
-func quotePowerShell(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
-}
 
 // runInSiloFallback creates the process suspended, assigns it to the job with
 // AssignProcessToJobObject, then resumes it. The suspended window matters:
 // the process is assigned before its initial thread runs a single
 // instruction, so it never observes the host filesystem view.
 func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint32, error) {
-	cmdArgs = injectPowerShellNoHistory(cmdArgs)
 	cmdLine := buildCommandLine(cmdArgs)
 	cmdPtr, err := syscall.UTF16PtrFromString(cmdLine)
 	if err != nil {

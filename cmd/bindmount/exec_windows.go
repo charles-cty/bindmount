@@ -15,7 +15,7 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name] [--link root[+][=|==]target] <job-name> -- <command> [args...]"
 
 func validPassthroughName(name string) bool {
 	switch name {
@@ -65,6 +65,7 @@ func cmdExecInner(args []string) (err error) {
 	}
 	detach := false
 	rootDir := ""
+	readOnlyRoot := false
 	passthrough := map[string]bool{}
 	passthroughSet := map[string]bool{}
 	verbose := false
@@ -79,6 +80,8 @@ func cmdExecInner(args []string) (err error) {
 			}
 			rootDir = ourArgs[i+1]
 			i++
+		case "--readonly-root":
+			readOnlyRoot = true
 		case "--passthrough", "--no-passthrough":
 			if i+1 >= len(ourArgs) || !validPassthroughName(ourArgs[i+1]) {
 				return fmt.Errorf("%s requires one of: executable, path, cwd, gitroot, appstate", ourArgs[i])
@@ -105,6 +108,9 @@ func cmdExecInner(args []string) (err error) {
 	}
 	if len(cmdArgs) == 0 {
 		return errors.New("exec requires a command to run inside the silo")
+	}
+	if rootDir != "" && readOnlyRoot {
+		return errors.New("--root and --readonly-root are mutually exclusive")
 	}
 	if rootDir != "" {
 		for _, name := range []string{"executable", "path", "cwd", "gitroot", "appexec"} {
@@ -158,6 +164,11 @@ func cmdExecInner(args []string) (err error) {
 			return err
 		}
 	}
+	if readOnlyRoot {
+		if err := createReadOnlyRootMappings(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+	}
 	if passthrough["path"] {
 		if err := createPathMappings(job, mappedPassthrough, verbose); err != nil {
 			return err
@@ -191,6 +202,14 @@ func cmdExecInner(args []string) (err error) {
 		if err := createExecutableMapping(job, executablePath, mappedPassthrough, verbose); err != nil {
 			return err
 		}
+	}
+
+	// Always-on mappings: PowerShell usability and WLDP temp trust.
+	if err := createPowerShellMappings(job, mappedPassthrough, verbose); err != nil {
+		return err
+	}
+	if err := createTempMapping(job, mappedPassthrough, verbose); err != nil {
+		return err
 	}
 
 	// Create any requested silo-scoped links before launching the process.
@@ -295,6 +314,71 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 		}
 	}
 	return nil
+}
+
+// createPowerShellMappings installs two always-on bind links that make
+// PowerShell usable inside the silo without write access to the rest of the
+// user profile:
+//
+//  1. The PSReadLine history file (file-level link) so command history persists
+//     across silo sessions.
+//
+//  2. %LOCALAPPDATA%\Microsoft\PowerShell (directory link) for PowerShell's
+//     per-user module cache, telemetry opt-out, and related state.
+//
+// Both paths are silently skipped when the environment variable is absent or
+// the path does not exist, keeping the function safe to call unconditionally.
+func createPowerShellMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	appdata := os.Getenv("APPDATA")
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if appdata == "" && localAppData == "" {
+		return nil
+	}
+
+	items := []struct {
+		name, path string
+	}{
+		{
+			"powershell-history",
+			filepath.Join(appdata, `Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`),
+		},
+		{
+			"powershell-local",
+			filepath.Join(localAppData, `Microsoft\PowerShell`),
+		},
+	}
+
+	for _, item := range items {
+		if item.path == "" {
+			continue
+		}
+		if _, err := os.Stat(item.path); err != nil {
+			// Path does not exist yet — skip silently. PSReadLine creates the
+			// history file on first use; the local cache dir is created by
+			// PowerShell on first launch.
+			continue
+		}
+		if err := createPassthroughMapping(job, item.name, item.path, mapped, verbose); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createTempMapping installs a writable passthrough for the user's %TEMP%
+// directory. WLDP's developer-mode script trust writes a record to %TEMP%
+// when evaluating PowerShell profile and script trust; without write access
+// the trust check fails and the session enters Constrained Language Mode.
+// The mapping is always installed regardless of --root / --readonly-root.
+func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	temp := os.Getenv("TEMP")
+	if temp == "" {
+		temp = os.Getenv("TMP")
+	}
+	if temp == "" {
+		return nil
+	}
+	return createPassthroughMapping(job, "temp", temp, mapped, verbose)
 }
 
 // createAppExecMappings resolves every App Execution Alias (.exe reparse
@@ -447,7 +531,30 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 	return nil
 }
 
-// createWorkingDirectoryMapping restores the caller's current directory
+// createReadOnlyRootMappings maps every drive currently visible to the caller
+// onto itself, read-only. Unlike --root there is no backing tree: each drive
+// keeps its real contents inside the silo but rejects writes. Mutually
+// exclusive with --root.
+func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+	drives, err := winapi.LogicalDriveLetters()
+	if err != nil {
+		return fmt.Errorf("enumerate drives for read-only root mappings: %w", err)
+	}
+	for _, letter := range drives {
+		root := fmt.Sprintf("%c:\\", letter)
+		if mapped[strings.ToLower(root)] {
+			continue
+		}
+		if err := bindfilter.CreateSilo(job, root, root, bindfilter.Options{ReadOnly: true}); err != nil {
+			return fmt.Errorf("create read-only root mapping %s -> %s: %w", root, root, err)
+		}
+		mapped[strings.ToLower(root)] = true
+		if verbose {
+			fmt.Printf("bindmount: mapping drive %s -> %s (read-only)\n", root, root)
+		}
+	}
+	return nil
+}
 // after root mode shadows its drive with the portable backing tree. A drive
 // root needs no narrower mapping because it is already the root mapping.
 func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, mapped map[string]bool, verbose bool) error {
