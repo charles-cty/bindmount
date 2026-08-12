@@ -265,7 +265,7 @@ func listMappings(volume, silo string) error {
 	} else {
 		var job winapi.Handle
 		var closeJob func()
-		job, closeJob, err = scope.open(winapi.JOB_OBJECT_QUERY)
+		job, closeJob, err = scope.open(winapi.JOB_OBJECT_ALL_ACCESS)
 		if err != nil {
 			return err
 		}
