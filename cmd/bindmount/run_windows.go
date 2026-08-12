@@ -186,7 +186,7 @@ func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint3
 		return 0, fmt.Errorf("assign process to job: %w", err)
 	}
 
-	if _, err := resumeThread(pi.Thread); err != nil {
+	if _, err := winapi.ResumeThread(winapi.Handle(pi.Thread)); err != nil {
 		syscall.TerminateProcess(pi.Process, 1)
 		syscall.CloseHandle(pi.Thread)
 		syscall.CloseHandle(pi.Process)
@@ -208,19 +208,6 @@ func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint3
 		return 0, fmt.Errorf("GetExitCodeProcess: %w", err)
 	}
 	return exitCode, nil
-}
-
-var procResumeThread = syscall.NewLazyDLL("kernel32.dll").NewProc("ResumeThread")
-
-func resumeThread(thread syscall.Handle) (uint32, error) {
-	r, _, err := procResumeThread.Call(uintptr(thread))
-	if r == 0xFFFFFFFF {
-		if err != syscall.Errno(0) {
-			return 0, err
-		}
-		return 0, errors.New("ResumeThread failed")
-	}
-	return uint32(r), nil
 }
 
 // buildCommandLine quotes arguments per CommandLineToArgvW rules.

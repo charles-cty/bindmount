@@ -97,9 +97,21 @@ func newSiloCommand() *cobra.Command {
 	silo.AddCommand(&cobra.Command{
 		Use: "kill <name>", Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			job, err := winapi.OpenJob(args[0], winapi.JOB_OBJECT_TERMINATE)
-			if err != nil {
-				return fmt.Errorf("open silo %q: %w", args[0], err)
+			// Mirror the exists check: try plain name first, then Global\ for
+			// silos created by elevated processes in session 0.
+			var job winapi.Handle
+			var openErr error
+			for _, name := range []string{args[0], `Global\` + args[0]} {
+				job, openErr = winapi.OpenJob(name, winapi.JOB_OBJECT_TERMINATE)
+				if openErr == nil {
+					break
+				}
+				if !errors.Is(openErr, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(openErr, syscall.ERROR_PATH_NOT_FOUND) {
+					return fmt.Errorf("open silo %q: %w", args[0], openErr)
+				}
+			}
+			if openErr != nil {
+				return fmt.Errorf("open silo %q: %w", args[0], openErr)
 			}
 			defer syscall.CloseHandle(job)
 			if err := winapi.TerminateJob(job, 1); err != nil {
@@ -115,7 +127,7 @@ func newSiloCommand() *cobra.Command {
 func newExecCommand() *cobra.Command {
 	// exec has a command payload after `--`; leave that payload untouched so
 	// Cobra does not try to interpret the child command's own flags.
-	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", Short: "create a Job Silo and launch a command", Long: "Create a named Job Silo, optionally install root and scoped mappings, and launch a command inside it. With --root, executable, PATH, current-directory, and Git-root passthrough are enabled by default; appstate passthrough is opt-in. Disable individual types with --no-passthrough <name>. --readonly-root is mutually exclusive with --root and does not change passthrough defaults.", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", Short: "create a Job Silo and launch a command", Long: "Create a named Job Silo, optionally install root and scoped mappings, and launch a command inside it. With --root, executable, PATH, current-directory, Git-root, and app-execution-alias passthrough are enabled by default; appstate and powershell passthrough are always opt-in. Disable individual types with --no-passthrough <name>. --readonly-root is mutually exclusive with --root and does not change passthrough defaults.", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
 		// Only treat -h/--help as a help request when it appears before the
 		// "--" separator; after it the payload belongs to the child command.
 		for _, arg := range args {
@@ -138,11 +150,11 @@ type siloScope struct {
 
 // open resolves the scope to a job handle (0 for global). The returned close
 // function must be called when the handle is no longer needed.
-func (s *siloScope) open() (job winapi.Handle, closeFn func(), err error) {
+func (s *siloScope) open(desiredAccess uint32) (job winapi.Handle, closeFn func(), err error) {
 	if s.name == "" {
 		return 0, func() {}, nil
 	}
-	h, err := winapi.OpenJob(s.name, winapi.JOB_OBJECT_ALL_ACCESS)
+	h, err := winapi.OpenJob(s.name, desiredAccess)
 	if err != nil {
 		return 0, nil, fmt.Errorf("open silo job %q: %w", s.name, err)
 	}
@@ -175,7 +187,7 @@ func newAddCommand() *cobra.Command {
 
 func addMapping(virtualRoot, target string, readOnly, merged bool, silo string) error {
 	scope := siloScope{name: silo}
-	job, closeJob, err := scope.open()
+	job, closeJob, err := scope.open(winapi.JOB_OBJECT_ALL_ACCESS)
 	if err != nil {
 		return err
 	}
@@ -208,7 +220,7 @@ func newRemoveCommand() *cobra.Command {
 
 func removeMapping(virtualRoot, silo string) error {
 	scope := siloScope{name: silo}
-	job, closeJob, err := scope.open()
+	job, closeJob, err := scope.open(winapi.JOB_OBJECT_ALL_ACCESS)
 	if err != nil {
 		return err
 	}
@@ -253,7 +265,7 @@ func listMappings(volume, silo string) error {
 	} else {
 		var job winapi.Handle
 		var closeJob func()
-		job, closeJob, err = scope.open()
+		job, closeJob, err = scope.open(winapi.JOB_OBJECT_QUERY)
 		if err != nil {
 			return err
 		}

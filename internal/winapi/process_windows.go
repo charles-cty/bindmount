@@ -3,6 +3,7 @@
 package winapi
 
 import (
+	"errors"
 	"syscall"
 	"unsafe"
 )
@@ -113,6 +114,21 @@ func UpdateProcThreadAttribute(attrList ProcThreadAttributeList, flags uint32, a
 // the caller).
 func DeleteProcThreadAttributeList(attrList ProcThreadAttributeList) {
 	procDeleteProcThreadAttributeList.Call(uintptr(unsafe.Pointer(&attrList[0])))
+}
+
+var procResumeThread = modkernel32.NewProc("ResumeThread")
+
+// ResumeThread decrements the thread's suspend count. Returns the previous
+// suspend count; a return value of 0xFFFFFFFF signals failure.
+func ResumeThread(thread Handle) (uint32, error) {
+	r, _, err := procResumeThread.Call(uintptr(thread))
+	if r == 0xFFFFFFFF {
+		if err != syscall.Errno(0) {
+			return 0, err
+		}
+		return 0, errors.New("ResumeThread failed")
+	}
+	return uint32(r), nil
 }
 
 // StartupInfoEx mirrors STARTUPINFOEXW. AttributeList must hold the data

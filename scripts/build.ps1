@@ -34,7 +34,10 @@ if ($Test) {
     } else {
         $oldGoOS = $env:GOOS
         $env:GOOS = 'windows'
-        try { Invoke-Go @('test', '-exec=true', './...') } finally { $env:GOOS = $oldGoOS }
+        # -run=^$ compiles all test binaries without executing them; on non-Windows
+        # hosts the compiled Windows binaries cannot run, so this only checks that
+        # the code compiles (not that tests pass).
+        try { Invoke-Go @('test', '-run=^$', './...') } finally { $env:GOOS = $oldGoOS }
     }
 }
 
@@ -53,8 +56,8 @@ if (-not $Test -and -not $Vet -or $Release) {
         Invoke-Go @('build', '-o', (Join-Path $dist 'decoy.exe'), './cmd/decoy')
     }
     finally {
-        $env:GOOS = $oldGoOS
-        $env:GOARCH = $oldGoARCH
+        if ($null -eq $oldGoOS) { Remove-Item Env:GOOS -ErrorAction SilentlyContinue } else { $env:GOOS = $oldGoOS }
+        if ($null -eq $oldGoARCH) { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue } else { $env:GOARCH = $oldGoARCH }
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'scripts/bindmount-gui.ps1') -Destination $dist -Force
 }

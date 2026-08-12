@@ -222,6 +222,11 @@ func cmdExecInner(args []string) (err error) {
 		}
 	}
 	exitCode, err := runInSilo(job, cmdArgs, detach, "")
+	// Package identity is intentionally not resolved here. resolvePackageName
+	// can detect MSIX aliases, but PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME
+	// combined with a silo job in the attribute list is rejected on build 26100
+	// (the same limitation that forces the fallback below). The fallback path
+	// likewise launches without a package identity.
 	if err != nil {
 		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
 		// on build 26100 with ERROR_INVALID_PARAMETER for a silo job), fall
@@ -428,12 +433,12 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		}
 		aliasPath := filepath.Join(windowsAppsDir, entry.Name())
 
-		realExe, err := winapi.ReadAppExecLink(aliasPath)
-		if err != nil || realExe == "" {
+		info, err := winapi.ReadAppExecLinkInfo(aliasPath)
+		if err != nil || info == nil || info.ExePath == "" {
 			// Not an APPEXECLINK or data unreadable — skip silently.
 			continue
 		}
-		realExe = filepath.Clean(realExe)
+		realExe := filepath.Clean(info.ExePath)
 
 		// Directory passthrough for the real binary's package folder. The
 		// App Model activation path dereferences the APPEXECLINK's embedded
@@ -452,8 +457,8 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		// Per-user package state folder passthrough. Packaged apps keep
 		// their writable state under %LOCALAPPDATA%\Packages\<family>; without
 		// it winget fails at startup with 0x80073db8 (state store load). The
-		// family name is string[0] of the reparse payload, carried on info.
-		if info, err := winapi.ReadAppExecLinkInfo(aliasPath); err == nil && info != nil && info.PackageFullName != "" {
+		// family name is string[0] of the reparse payload, already decoded above.
+		if info.PackageFullName != "" {
 			stateDir := filepath.Join(localAppData, "Packages", info.PackageFullName)
 			if stat, err := os.Stat(stateDir); err == nil && stat.IsDir() {
 				if err := createPassthroughMapping(job, "appexec", stateDir, mapped, verbose); err != nil {
@@ -512,10 +517,15 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 		// normal profile directory and its NTFS short-name alias in root mode.
 		if letter == 'C' {
 			if profile := os.Getenv("USERPROFILE"); profile != "" {
-				profileRelative := strings.TrimLeft(filepath.Clean(profile)[2:], `\`)
-				if profileRelative != "" {
-					if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
-						return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
+				// Guard against UNC profiles (\\server\share\...): VolumeName
+				// returns "\\server\share" for those, not a two-char drive spec.
+				vol := filepath.VolumeName(profile)
+				if len(vol) == 2 {
+					profileRelative := strings.TrimLeft(filepath.Clean(profile)[len(vol):], `\`)
+					if profileRelative != "" {
+						if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
+							return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
+						}
 					}
 				}
 			}
@@ -558,8 +568,12 @@ func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verb
 	}
 	return nil
 }
-// after root mode shadows its drive with the portable backing tree. A drive
-// root needs no narrower mapping because it is already the root mapping.
+// createWorkingDirectoryMapping exposes the launcher's current working
+// directory inside the silo. This supplements --root mode: the cwd is
+// already reachable when it lies under a drive that has been passed through,
+// but is installed as an explicit narrow mapping when --root has shadowed
+// that drive with an empty backing tree. A drive root needs no narrower
+// mapping because it is already the root mapping.
 func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, mapped map[string]bool, verbose bool) error {
 	workingDir = filepath.Clean(workingDir)
 	return createPassthroughMapping(job, "cwd", workingDir, mapped, verbose)

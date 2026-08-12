@@ -66,7 +66,9 @@ type jobobjectExtendedLimitInformation struct {
 }
 
 // CreateJob creates a new job object. name may be empty for an unnamed job;
-// a non-empty name is created in the Global\ namespace when it has no prefix.
+// a non-empty plain name is created in the caller's session namespace — prefix
+// with "Global\" to create in the global namespace (session 0), which is where
+// elevated processes' objects are visible across sessions.
 // Returns an error if the name already exists, preventing silent reuse of an
 // existing job that may already hold processes.
 func CreateJob(name string) (Handle, error) {
@@ -117,9 +119,12 @@ func OpenJob(name string, desiredAccess uint32) (Handle, error) {
 	return Handle(h), nil
 }
 
-// SetJobLimitFlags sets the given JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-// LimitFlags on the job, replacing the current flag word. Callers combine
-// JOB_OBJECT_LIMIT_* constants.
+// SetJobLimitFlags sets the LimitFlags field of the job's extended limit
+// information, replacing the current flag word. All other fields in
+// JOBOBJECT_EXTENDED_LIMIT_INFORMATION (working-set limits, process count,
+// memory caps, I/O counters) are written as zero; this function is intended
+// only for freshly created jobs before any other limits are configured.
+// Callers combine JOB_OBJECT_LIMIT_* constants.
 func SetJobLimitFlags(job Handle, flags uint32) error {
 	// A silo must not permit either explicit (CREATE_BREAKAWAY_FROM_JOB) or
 	// silent breakaway. Keep this invariant at the Win32 wrapper boundary so a

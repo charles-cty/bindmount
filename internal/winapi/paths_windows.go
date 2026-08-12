@@ -134,13 +134,13 @@ func NTPathToDOS(ntPath string) (string, error) {
 	}
 
 	path := syscall.UTF16ToString(buf[:n])
-	// Strip the \\?\ or \\?\UNC\ decoration.
-	path = strings.TrimPrefix(path, `\\?\UNC\`)
-	if strings.HasPrefix(path, `\\?\`) {
+	// Strip the \\?\ or \\?\UNC\ decoration returned by GetFinalPathNameByHandle.
+	// \\?\UNC\server\share -> \\server\share  (UNC path)
+	// \\?\C:\...           -> C:\...          (local path)
+	if strings.HasPrefix(path, `\\?\UNC\`) {
+		path = `\\` + path[len(`\\?\UNC\`):]
+	} else if strings.HasPrefix(path, `\\?\`) {
 		path = path[len(`\\?\`):]
-	} else if strings.HasPrefix(path, `UNC\`) && !strings.HasPrefix(globalRoot, `\\?\UNC`) {
-		// UNC\server\share -> \\server\share
-		path = `\\` + path[len(`UNC\`):]
 	}
 	return path, nil
 }

@@ -40,6 +40,7 @@ func OpenJob(name string, access uint32) (Handle, error) { return 0, errENOSYS }
 func SetKillOnJobClose(job Handle) error                 { return errENOSYS }
 func PromoteToSilo(job Handle) error                     { return errENOSYS }
 func AssignProcessToJob(job, process Handle) error       { return errENOSYS }
+func ResumeThread(_ Handle) (uint32, error)             { return 0, errENOSYS }
 
 // ReadAppExecLink stub — APPEXECLINK reparse points only exist on Windows.
 func ReadAppExecLink(_ string) (string, error) { return "", errENOSYS }

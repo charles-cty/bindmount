@@ -112,20 +112,17 @@ func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 	// Scan the payload for null-terminated strings by shape, trying the
 	// headerless (offset 12) layout first and falling back to the
 	// version+count (offset 16) layout. See the layout comment above.
-	strings, err := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV3:returned])
-	if err != nil || len(strings) <= appExecLinkExeStringIdx {
-		strings, err = parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV1:returned])
+	strs := parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV3:returned])
+	if len(strs) <= appExecLinkExeStringIdx {
+		strs = parseAllAppExecLinkStrings(buf[appExecLinkStringsOffsetV1:returned])
 	}
-	if err != nil {
-		return nil, err
-	}
-	if len(strings) <= appExecLinkExeStringIdx {
+	if len(strs) <= appExecLinkExeStringIdx {
 		return nil, fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
-			path, len(strings), appExecLinkExeStringIdx+1)
+			path, len(strs), appExecLinkExeStringIdx+1)
 	}
 	return &AppExecLinkInfo{
-		PackageFullName: strings[0],
-		ExePath:         strings[appExecLinkExeStringIdx],
+		PackageFullName: strs[0],
+		ExePath:         strs[appExecLinkExeStringIdx],
 	}, nil
 }
 
@@ -144,7 +141,7 @@ func ReadAppExecLink(path string) (string, error) {
 // stops at the first unterminated or empty entry; the documented layout has
 // exactly four strings followed by no payload, so a trailing partial read
 // marks the end of the list rather than a format error.
-func parseAllAppExecLinkStrings(data []byte) ([]string, error) {
+func parseAllAppExecLinkStrings(data []byte) []string {
 	var out []string
 	pos := 0
 	for pos+1 < len(data) {
@@ -173,5 +170,5 @@ func parseAllAppExecLinkStrings(data []byte) ([]string, error) {
 		out = append(out, string(utf16.Decode(units)))
 		pos = end + 2 // skip past the null terminator
 	}
-	return out, nil
+	return out
 }
