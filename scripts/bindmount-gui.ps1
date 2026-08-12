@@ -306,7 +306,7 @@ $execLinks.Size = New-Object Drawing.Size(820, 70)
 $execTab.Controls.Add($execLinks)
 $execWindows = New-Object Windows.Forms.CheckBox
 $execWindows.Text = 'Map C:\Windows read-write'
-$execWindows.Location = New-Object Drawing.Point(20, 280)
+$execWindows.Location = New-Object Drawing.Point(20, 250)
 $execWindows.AutoSize = $true
 $execWindows.Checked = $true
 $execTab.Controls.Add($execWindows)
@@ -317,6 +317,11 @@ $execRoot.AutoSize = $true
 $execTab.Controls.Add($execRoot)
 $execRootDir = Add-TextBox $execTab 330 306 510
 $execRootDir.Text = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'bindmount\roots'
+$execReadOnlyRoot = New-Object Windows.Forms.CheckBox
+$execReadOnlyRoot.Text = 'Mark all visible drives read-only'
+$execReadOnlyRoot.Location = New-Object Drawing.Point(20, 280)
+$execReadOnlyRoot.AutoSize = $true
+$execTab.Controls.Add($execReadOnlyRoot)
 $execPassthrough = New-Object Windows.Forms.CheckBox
 $execPassthrough.Text = 'Passthrough executable directory'
 $execPassthrough.Location = New-Object Drawing.Point(20, 335)
@@ -349,11 +354,18 @@ $execAppStatePassthrough.AutoSize = $true
 $execTab.Controls.Add($execAppStatePassthrough)
 $execRoot.Add_CheckedChanged({
     if ($execRoot.Checked) {
+        $execReadOnlyRoot.Checked = $false
         $execPassthrough.Checked = $true
         $execPathPassthrough.Checked = $true
         $execCwdPassthrough.Checked = $true
         $execGitRootPassthrough.Checked = $true
         $execAppExecPassthrough.Checked = $true
+        $execBlockWsl.Checked = $true
+    }
+})
+$execReadOnlyRoot.Add_CheckedChanged({
+    if ($execReadOnlyRoot.Checked) {
+        $execRoot.Checked = $false
         $execBlockWsl.Checked = $true
     }
 })
@@ -373,10 +385,18 @@ $execGitRepositoryRoot.ReadOnly = $true
 # Build the argument list for bindmount exec from the current GUI state.
 # Silo name and command validity are checked by the callers that need them.
 function Get-ExecArguments {
-    $arguments = @('exec', '--detach')
+    param([switch]$Detach)
+    $arguments = @('exec')
+    if ($Detach) { $arguments += '--detach' }
+    if ($execRoot.Checked -and $execReadOnlyRoot.Checked) {
+        throw 'Shadow all visible drives and Mark all visible drives read-only are mutually exclusive.'
+    }
     if ($execRoot.Checked) {
         if (-not $execRootDir.Text) { throw 'Enter a root backing directory.' }
         $arguments += @('--root', $execRootDir.Text)
+    }
+    if ($execReadOnlyRoot.Checked) {
+        $arguments += '--readonly-root'
     }
     if ($execPassthrough.Checked) {
         $arguments += @('--passthrough', 'executable')
@@ -448,7 +468,7 @@ $execButton.Add_Click({
         # bindmount itself renames app execution aliases aside (the driver
         # cannot anchor a mapping on them), keeping the rename in --detach
         # mode so the block persists. Nothing extra to do here.
-        Start-Bindmount (Get-ExecArguments)
+        Start-Bindmount (Get-ExecArguments -Detach)
     }
 })
 $execCopyButton = Add-Button $execTab 'Copy command' 250 495
