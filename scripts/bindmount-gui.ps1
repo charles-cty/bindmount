@@ -40,28 +40,49 @@ if (-not (Test-Path -LiteralPath $cli)) {
 }
 $decoyExe = Join-Path (Split-Path -Parent $cli) 'decoy.exe'
 
-# Well-known wsl.exe install locations. The "Block WSL" option redirects any
-# of these that exist on the host to decoy.exe via file-level bind links.
-$script:wslExeCandidates = @(
-    (Join-Path ${env:ProgramFiles} 'WSL\wsl.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\wsl.exe')
-)
-$windowsAppsRoot = Join-Path ${env:ProgramFiles} 'WindowsApps'
-if (Test-Path -LiteralPath $windowsAppsRoot) {
-    $wslPackageDirs = Get-ChildItem -LiteralPath $windowsAppsRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'MicrosoftCorporationII.WindowsSubsystemForLinux_*' }
-    foreach ($packageDir in $wslPackageDirs) {
-        $script:wslExeCandidates += (Join-Path $packageDir.FullName 'wsl.exe')
-    }
-}
-
+# Resolve wsl.exe locations by scanning PATH. The WindowsApps alias
+# (%LOCALAPPDATA%\Microsoft\WindowsApps\wsl.exe) is an APPEXECLINK reparse
+# point that cannot be shadowed by a bind link, so it is skipped here; the
+# bind-link path in createSiloLink handles it via rename instead when it is
+# passed explicitly.
 function Get-ExistingWslExePaths {
+    $windowsAppsAlias = [IO.Path]::GetFullPath(
+        [IO.Path]::Combine($env:LOCALAPPDATA, 'Microsoft', 'WindowsApps', 'wsl.exe')
+    ).ToLowerInvariant()
+
     $seen = @{}
     $paths = @()
-    foreach ($candidate in $script:wslExeCandidates) {
-        if ($candidate -and (Test-Path -LiteralPath $candidate) -and -not $seen.ContainsKey($candidate.ToLowerInvariant())) {
-            $seen[$candidate.ToLowerInvariant()] = $true
+    foreach ($dir in $env:PATH -split ';') {
+        $dir = $dir.Trim('"').Trim()
+        if (-not $dir) { continue }
+        $candidate = [IO.Path]::Combine($dir, 'wsl.exe')
+        $lower = $candidate.ToLowerInvariant()
+        if ($seen.ContainsKey($lower)) { continue }
+        $seen[$lower] = $true
+        if ($lower -eq $windowsAppsAlias) { continue }
+        if (Test-Path -LiteralPath $candidate) {
             $paths += $candidate
+        }
+    }
+    # Also check the standalone WSL package location regardless of PATH.
+    $standaloneWsl = [IO.Path]::Combine(${env:ProgramFiles}, 'WSL', 'wsl.exe')
+    $standaloneLower = $standaloneWsl.ToLowerInvariant()
+    if (-not $seen.ContainsKey($standaloneLower) -and (Test-Path -LiteralPath $standaloneWsl)) {
+        $seen[$standaloneLower] = $true
+        $paths += $standaloneWsl
+    }
+    # Enumerate versioned WSL package directories under %ProgramFiles%\WindowsApps.
+    $windowsAppsRoot = [IO.Path]::Combine(${env:ProgramFiles}, 'WindowsApps')
+    if (Test-Path -LiteralPath $windowsAppsRoot) {
+        $wslPackageDirs = Get-ChildItem -LiteralPath $windowsAppsRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'MicrosoftCorporationII.WindowsSubsystemForLinux_*' }
+        foreach ($packageDir in $wslPackageDirs) {
+            $candidate = [IO.Path]::Combine($packageDir.FullName, 'wsl.exe')
+            $lower = $candidate.ToLowerInvariant()
+            if (-not $seen.ContainsKey($lower) -and (Test-Path -LiteralPath $candidate)) {
+                $seen[$lower] = $true
+                $paths += $candidate
+            }
         }
     }
     return $paths
