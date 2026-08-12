@@ -82,20 +82,25 @@ bindmount silo kill <job-name>
 
 `--root` creates a backing directory for every drive visible when the silo is
 created. It is a launch-time snapshot, not a drive hot-plug monitor. When
-`--root` is supplied, executable, PATH, current-directory, and Git-root
-passthrough are enabled by default:
+`--root` is supplied, executable, PATH, current-directory, Git-root, and
+app-execution-alias passthrough are enabled by default:
 
 - `executable` — expose the executable's containing directory.
 - `path` — expose every existing directory listed in `PATH`.
 - `cwd` — expose the launcher's current working directory.
 - `gitroot` — expose the Git repository root containing the current directory.
-- `appstate` — expose `APPDATA`, `LOCALAPPDATA`, and `C:\ProgramData`.
+- `appexec` — expose Windows app execution aliases and their package install roots.
 
 Each passthrough is read-write and can be independently controlled with
 `--passthrough <name>` or `--no-passthrough <name>`. Without `--root`, all
-passthrough types are disabled unless explicitly enabled. `appstate` is
-opt-in even when `--root` is present because it exposes persistent application
-state rather than only launch-time dependencies.
+passthrough types are disabled unless explicitly enabled. Two additional
+passthrough types are always opt-in, even with `--root`, because they expose
+persistent user state rather than launch-time dependencies:
+
+- `appstate` — expose `APPDATA`, `LOCALAPPDATA`, and `C:\ProgramData`.
+- `powershell` — expose the PSReadLine command history file and the per-user
+  PowerShell module cache, and pass through `%TEMP%` so WLDP script trust works
+  (without `%TEMP%`, PowerShell enters Constrained Language Mode inside the silo).
 
 `--readonly-root` is mutually exclusive with `--root`. Instead of a backing
 tree it maps every currently visible drive onto the same location with a

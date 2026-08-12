@@ -395,12 +395,18 @@ $execBlockWsl.Text = 'Block WSL (redirect wsl.exe to decoy)'
 $execBlockWsl.Location = New-Object Drawing.Point(20, 410)
 $execBlockWsl.AutoSize = $true
 $execTab.Controls.Add($execBlockWsl)
-Add-Label $execTab 'Current working directory:' 20 440
-$execWorkingDirectory = Add-TextBox $execTab 180 436 660
+$execPowerShellPassthrough = New-Object Windows.Forms.CheckBox
+$execPowerShellPassthrough.Text = 'Passthrough PowerShell profile and history'
+$execPowerShellPassthrough.Location = New-Object Drawing.Point(20, 435)
+$execPowerShellPassthrough.AutoSize = $true
+$execPowerShellPassthrough.Checked = $true
+$execTab.Controls.Add($execPowerShellPassthrough)
+Add-Label $execTab 'Current working directory:' 20 465
+$execWorkingDirectory = Add-TextBox $execTab 180 461 660
 $execWorkingDirectory.Text = $currentWorkingDirectory
 $execWorkingDirectory.ReadOnly = $true
-Add-Label $execTab 'Git repository root:' 20 465
-$execGitRepositoryRoot = Add-TextBox $execTab 180 461 660
+Add-Label $execTab 'Git repository root:' 20 490
+$execGitRepositoryRoot = Add-TextBox $execTab 180 486 660
 $execGitRepositoryRoot.Text = if ($gitRepositoryRoot) { $gitRepositoryRoot } else { '(none detected)' }
 $execGitRepositoryRoot.ReadOnly = $true
 # Build the argument list for bindmount exec from the current GUI state.
@@ -436,6 +442,10 @@ function Get-ExecArguments {
         } elseif ($execRoot.Checked) {
             $arguments += @('--no-passthrough', $option.Name)
         }
+    }
+    # powershell passthrough is off by default in the CLI; emit --passthrough only when explicitly enabled.
+    if ($execPowerShellPassthrough.Checked) {
+        $arguments += @('--passthrough', 'powershell')
     }
     $hasWindowsRoot = $false
     foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {
@@ -480,7 +490,7 @@ function Get-ExecArguments {
     return ,$arguments
 }
 
-$execButton = Add-Button $execTab 'Create silo and run command' 20 495
+$execButton = Add-Button $execTab 'Create silo and run command' 20 520
 $execButton.Add_Click({
     Run-Action {
         if (-not $execName.Text -or -not $execCommand.Text) {
@@ -492,7 +502,7 @@ $execButton.Add_Click({
         Start-Bindmount (Get-ExecArguments -Detach)
     }
 })
-$execCopyButton = Add-Button $execTab 'Copy command' 250 495
+$execCopyButton = Add-Button $execTab 'Copy command' 250 520
 $execCopyButton.Add_Click({
     Run-Action {
         $arguments = Get-ExecArguments

@@ -19,7 +19,7 @@ const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir | --re
 
 func validPassthroughName(name string) bool {
 	switch name {
-	case "executable", "path", "cwd", "gitroot", "appstate", "appexec":
+	case "executable", "path", "cwd", "gitroot", "appstate", "appexec", "powershell":
 		return true
 	default:
 		return false
@@ -84,7 +84,7 @@ func cmdExecInner(args []string) (err error) {
 			readOnlyRoot = true
 		case "--passthrough", "--no-passthrough":
 			if i+1 >= len(ourArgs) || !validPassthroughName(ourArgs[i+1]) {
-				return fmt.Errorf("%s requires one of: executable, path, cwd, gitroot, appstate", ourArgs[i])
+				return fmt.Errorf("%s requires one of: executable, path, cwd, gitroot, appstate, appexec, powershell", ourArgs[i])
 			}
 			name := ourArgs[i+1]
 			i++
@@ -204,12 +204,15 @@ func cmdExecInner(args []string) (err error) {
 		}
 	}
 
-	// Always-on mappings: PowerShell usability and WLDP temp trust.
-	if err := createPowerShellMappings(job, mappedPassthrough, verbose); err != nil {
-		return err
-	}
-	if err := createTempMapping(job, mappedPassthrough, verbose); err != nil {
-		return err
+	// Optional mapping: PowerShell profile/history and TEMP for WLDP script trust.
+	// Enabled with --passthrough powershell.
+	if passthrough["powershell"] {
+		if err := createPowerShellMappings(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
+		if err := createTempMapping(job, mappedPassthrough, verbose); err != nil {
+			return err
+		}
 	}
 
 	// Create any requested silo-scoped links before launching the process.
