@@ -3,9 +3,143 @@
 package main
 
 import (
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestRootHelpDescribesCommand(t *testing.T) {
+	root := newRootCommand()
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Manage global or silo-scoped Windows Bind Filter mappings",
+		"Most mapping and silo operations require elevation",
+		"Available Commands:",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("root help does not contain %q:\n%s", want, output.String())
+		}
+	}
+}
+
+func TestShouldShowSkippedMappingWarnings(t *testing.T) {
+	cases := []struct {
+		detach, verbose, want bool
+	}{
+		{false, false, true},
+		{false, true, true},
+		{true, false, false},
+		{true, true, true},
+	}
+	for _, c := range cases {
+		if got := shouldShowSkippedMappingWarnings(c.detach, c.verbose); got != c.want {
+			t.Errorf("detach=%v verbose=%v: got %v, want %v", c.detach, c.verbose, got, c.want)
+		}
+	}
+}
+
+func TestWarnSkippedMapping(t *testing.T) {
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = oldStderr
+		r.Close()
+	})
+
+	warnSkippedMapping(false, "suppressed", `C:\hidden`, `D:\hidden`, "not visible")
+	warnSkippedMapping(true, "user", `C:\foo`, `D:\one`, "virtual root is already mapped")
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = oldStderr
+
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "bindmount: warning: skipping user mapping C:\\foo -> D:\\one: virtual root is already mapped\n"
+	if string(got) != want {
+		t.Fatalf("warning = %q, want %q", got, want)
+	}
+}
+
+func TestPowerShellMappingPathsSkipMissingEnvironmentVariables(t *testing.T) {
+	items := powerShellMappingPaths("", `C:\Users\test\AppData\Local`)
+	if len(items) != 1 {
+		t.Fatalf("mapping count = %d, want 1", len(items))
+	}
+	if items[0].name != "powershell-local" {
+		t.Fatalf("mapping name = %q, want powershell-local", items[0].name)
+	}
+	if !filepath.IsAbs(items[0].path) {
+		t.Fatalf("mapping path is relative: %q", items[0].path)
+	}
+
+	items = powerShellMappingPaths(`C:\Users\test\AppData\Roaming`, "")
+	if len(items) != 1 || items[0].name != "powershell-history" {
+		t.Fatalf("mappings = %#v, want only powershell-history", items)
+	}
+	if !filepath.IsAbs(items[0].path) {
+		t.Fatalf("mapping path is relative: %q", items[0].path)
+	}
+}
+
+func TestProfileRelativeForDrive(t *testing.T) {
+	if got, ok := profileRelativeForDrive(`D:\Users\test`, 'D'); !ok || got != `Users\test` {
+		t.Fatalf("D: profile = %q, %v; want Users\\test, true", got, ok)
+	}
+	if got, ok := profileRelativeForDrive(`D:\Users\test`, 'C'); ok || got != "" {
+		t.Fatalf("D: profile on C: = %q, %v; want empty, false", got, ok)
+	}
+	if got, ok := profileRelativeForDrive(`\\server\share\Users\test`, 'C'); ok || got != "" {
+		t.Fatalf("UNC profile = %q, %v; want empty, false", got, ok)
+	}
+}
+
+func TestSiloLookupNames(t *testing.T) {
+	cases := []struct {
+		name string
+		want []string
+	}{
+		{"demo", []string{"demo", `Global\demo`}},
+		{`Global\demo`, []string{`Global\demo`}},
+		{`global\demo`, []string{`global\demo`}},
+		{`Local\demo`, []string{`Local\demo`}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := siloLookupNames(c.name)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("siloLookupNames(%q) = %#v, want %#v", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+func TestExecRequiresCommandSeparator(t *testing.T) {
+	for _, args := range [][]string{
+		{"demo", "cmd.exe"},
+		{"--link", `C:\a=C:\b`, "demo", "cmd.exe"},
+	} {
+		err := cmdExecInner(args)
+		if err == nil || !strings.Contains(err.Error(), `requires "--"`) {
+			t.Fatalf("cmdExecInner(%q) error = %v, want missing separator error", args, err)
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // splitLinkSpec
@@ -128,4 +262,3 @@ func TestBuildCommandLine(t *testing.T) {
 		})
 	}
 }
-

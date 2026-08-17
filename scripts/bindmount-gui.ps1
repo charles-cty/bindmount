@@ -407,7 +407,7 @@ $execReadOnlyRoot.Add_CheckedChanged({
     }
 })
 $execBlockWsl = New-Object Windows.Forms.CheckBox
-$execBlockWsl.Text = 'Block WSL (redirect wsl.exe to decoy)'
+$execBlockWsl.Text = 'Block WSL'
 $execBlockWsl.Location = New-Object Drawing.Point(360, 410)
 $execBlockWsl.AutoSize = $true
 $execBlockWsl.Checked = $true
@@ -478,9 +478,7 @@ function Get-ExecArguments {
         # instead of launching WSL. Links are file-level so wsl.exe is
         # shadowed even when its parent directory is passed through.
         # Execution aliases under WindowsApps are 0-byte APPEXECLINK reparse
-        # points the driver cannot map; bindmount renames those aside itself
-        # (wsl.exe.bindmount-blocked), keeping the rename in --detach mode so
-        # the block persists. Already-blocked aliases are skipped.
+        # points the driver cannot map, so skip them.
         $wslPaths = Get-ExistingWslExePaths
         if ($wslPaths.Count -gt 0) {
             if (-not (Test-Path -LiteralPath $decoyExe)) {
@@ -488,8 +486,7 @@ function Get-ExecArguments {
             }
             foreach ($wslPath in $wslPaths) {
                 $item = Get-Item -LiteralPath $wslPath -Force
-                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
-                    (Test-Path -LiteralPath "$wslPath.bindmount-blocked")) {
+                if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
                     continue
                 }
                 $arguments += @('--link', "$wslPath==$decoyExe")
@@ -513,9 +510,6 @@ $execButton.Add_Click({
         if (-not $execName.Text -or -not $execCommand.Text) {
             throw 'Enter a silo name and command.'
         }
-        # bindmount itself renames app execution aliases aside (the driver
-        # cannot anchor a mapping on them), keeping the rename in --detach
-        # mode so the block persists. Nothing extra to do here.
         Start-Bindmount (Get-ExecArguments -Detach)
     }
 })

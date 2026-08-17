@@ -31,15 +31,16 @@ func TestParseAllAppExecLinkStringsTypical(t *testing.T) {
 		`C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.280.0_x64__8wekyb3d8bbwe\winget.exe`,
 		"0",
 	)
-	got, err := parseAllAppExecLinkStrings(payload)
-	if err != nil {
-		t.Fatalf("parseAllAppExecLinkStrings: %v", err)
-	}
+	got := parseAllAppExecLinkStrings(payload)
 	if len(got) != 4 {
 		t.Fatalf("got %d strings, want 4", len(got))
 	}
 	if got[2] != `C:\Program Files\WindowsApps\Microsoft.DesktopAppInstaller_1.29.280.0_x64__8wekyb3d8bbwe\winget.exe` {
 		t.Errorf("string[2] = %q", got[2])
+	}
+	info := appExecLinkInfoFromStrings(got)
+	if info.PackageFamilyName != "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" {
+		t.Errorf("package family name = %q", info.PackageFamilyName)
 	}
 }
 
@@ -57,10 +58,7 @@ func TestParseAllAppExecLinkStringsIgnoresCorruptCount(t *testing.T) {
 	// Simulate the corrupted header: first bytes of string[0] land where the
 	// count would be read. The parser no longer receives a count at all, so
 	// this test simply verifies the payload alone yields all four strings.
-	got, err := parseAllAppExecLinkStrings(payload)
-	if err != nil {
-		t.Fatalf("parseAllAppExecLinkStrings: %v", err)
-	}
+	got := parseAllAppExecLinkStrings(payload)
 	if len(got) != 4 {
 		t.Fatalf("got %d strings, want 4", len(got))
 	}
@@ -75,10 +73,7 @@ func TestParseAllAppExecLinkStringsTruncatedTail(t *testing.T) {
 	payload := buildAppExecLinkPayload("pkg", "entry", `C:\x\y.exe`, "0")
 	// Chop the final null terminator off, leaving "0" unterminated.
 	payload = payload[:len(payload)-2]
-	got, err := parseAllAppExecLinkStrings(payload)
-	if err != nil {
-		t.Fatalf("parseAllAppExecLinkStrings: %v", err)
-	}
+	got := parseAllAppExecLinkStrings(payload)
 	if len(got) != 3 {
 		t.Fatalf("got %d strings, want 3 (unterminated tail dropped)", len(got))
 	}

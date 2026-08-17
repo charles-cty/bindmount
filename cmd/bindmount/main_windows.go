@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -13,40 +14,6 @@ import (
 	"bindmount/internal/bindfilter"
 	"bindmount/internal/winapi"
 )
-
-const usageText = `bindmount - manage Windows Bind Links via the Bind Filter (bindflt.sys)
-
-Usage:
-  bindmount <command> [arguments]
-
-Commands:
-  add <virtual-root> <target>     Create a writable bind link
-  add <root[+][=|==]target>        Create a per-link bind mapping
-        [--silo <job-name>]         Scope the mapping to a silo job (default: global)
-
-  remove <virtual-root>           Remove a bind link
-        [--silo <job-name>]         Scope: remove from a silo job (default: global)
-
-  list [<volume-path>]            List mappings on a volume (default: C:\)
-        [--silo <job-name>]         List mappings of a silo job instead
-
-  exec <job-name> <command>...    Create a silo job, run the command inside it,
-                                    and terminate the job when it exits.
-                                    Use with add/remove --silo to set up links first.
-
-Notes:
-  - add/remove/list require elevation (SeDebugPrivilege-equivalent access is
-    enforced by the driver, not by this tool).
-  - Silo job names are looked up with OpenJobObject; the job must already be a
-    silo for add, and must exist for remove/list.
-  - This tool uses the undocumented Bf* interface of bindfltapi.dll. See
-    docs/BindFilterAPI.md. It is not a stable contract.
-`
-
-func usage(exitCode int) {
-	fmt.Fprint(os.Stderr, usageText)
-	os.Exit(exitCode)
-}
 
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
@@ -56,10 +23,48 @@ func main() {
 }
 
 func newRootCommand() *cobra.Command {
-	root := &cobra.Command{Use: "bindmount", SilenceUsage: true, SilenceErrors: true}
+	root := &cobra.Command{
+		Use:   "bindmount",
+		Short: "manage Windows Bind Filter mappings and Job Silos",
+		Long: `Manage global or silo-scoped Windows Bind Filter mappings and launch
+processes inside Job Silos with an optional isolated filesystem root.
+
+Most mapping and silo operations require elevation. The Bf* interface used by
+this tool is undocumented; see docs/BindFilterAPI.md for compatibility notes.`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
 	root.AddCommand(newAddCommand(), newRemoveCommand(), newListCommand(), newExecCommand())
 	root.AddCommand(newSiloCommand())
 	return root
+}
+
+func siloLookupNames(name string) []string {
+	if len(name) >= len(`Global\`) && strings.EqualFold(name[:len(`Global\`)], `Global\`) {
+		return []string{name}
+	}
+	if len(name) >= len(`Local\`) && strings.EqualFold(name[:len(`Local\`)], `Local\`) {
+		return []string{name}
+	}
+	return []string{name, `Global\` + name}
+}
+
+// openSiloJob applies the same namespace resolution everywhere a named silo
+// is opened: the caller's session namespace first, then Global\ for silos
+// created in another session. Explicit Global\ and Local\ names are tried as-is.
+func openSiloJob(name string, desiredAccess uint32) (winapi.Handle, error) {
+	var lastErr error
+	for _, candidate := range siloLookupNames(name) {
+		job, err := winapi.OpenJob(candidate, desiredAccess)
+		if err == nil {
+			return job, nil
+		}
+		lastErr = err
+		if !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+			return 0, err
+		}
+	}
+	return 0, lastErr
 }
 
 func newSiloCommand() *cobra.Command {
@@ -75,20 +80,18 @@ func newSiloCommand() *cobra.Command {
 			// ERROR_ACCESS_DENIED means the open reached the object but the
 			// security descriptor rejected the access mask, which only
 			// happens when the job exists.
-			for _, name := range []string{args[0], `Global\` + args[0]} {
-				job, err := winapi.OpenJob(name, winapi.JOB_OBJECT_QUERY)
-				if err == nil {
-					syscall.CloseHandle(job)
-					fmt.Printf("bindmount: silo %q exists\n", args[0])
-					return nil
-				}
-				if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
-					fmt.Printf("bindmount: silo %q exists\n", args[0])
-					return nil
-				}
-				if !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
-					return fmt.Errorf("check silo %q: %w", args[0], err)
-				}
+			job, err := openSiloJob(args[0], winapi.JOB_OBJECT_QUERY)
+			if err == nil {
+				syscall.CloseHandle(job)
+				fmt.Printf("bindmount: silo %q exists\n", args[0])
+				return nil
+			}
+			if errors.Is(err, syscall.ERROR_ACCESS_DENIED) {
+				fmt.Printf("bindmount: silo %q exists\n", args[0])
+				return nil
+			}
+			if !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+				return fmt.Errorf("check silo %q: %w", args[0], err)
 			}
 			fmt.Printf("bindmount: silo %q does not exist\n", args[0])
 			return nil
@@ -99,17 +102,7 @@ func newSiloCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Mirror the exists check: try plain name first, then Global\ for
 			// silos created by elevated processes in session 0.
-			var job winapi.Handle
-			var openErr error
-			for _, name := range []string{args[0], `Global\` + args[0]} {
-				job, openErr = winapi.OpenJob(name, winapi.JOB_OBJECT_TERMINATE)
-				if openErr == nil {
-					break
-				}
-				if !errors.Is(openErr, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(openErr, syscall.ERROR_PATH_NOT_FOUND) {
-					return fmt.Errorf("open silo %q: %w", args[0], openErr)
-				}
-			}
+			job, openErr := openSiloJob(args[0], winapi.JOB_OBJECT_TERMINATE)
 			if openErr != nil {
 				return fmt.Errorf("open silo %q: %w", args[0], openErr)
 			}
@@ -154,7 +147,7 @@ func (s *siloScope) open(desiredAccess uint32) (job winapi.Handle, closeFn func(
 	if s.name == "" {
 		return 0, func() {}, nil
 	}
-	h, err := winapi.OpenJob(s.name, desiredAccess)
+	h, err := openSiloJob(s.name, desiredAccess)
 	if err != nil {
 		return 0, nil, fmt.Errorf("open silo job %q: %w", s.name, err)
 	}

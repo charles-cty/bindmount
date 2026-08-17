@@ -48,8 +48,8 @@ func ReadAppExecLink(_ string) (string, error) { return "", errENOSYS }
 
 // AppExecLinkInfo stub.
 type AppExecLinkInfo struct {
-	PackageFullName string
-	ExePath         string
+	PackageFamilyName string
+	ExePath           string
 }
 
 // ReadAppExecLinkInfo stub.

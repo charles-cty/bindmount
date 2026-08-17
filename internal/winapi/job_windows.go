@@ -37,9 +37,7 @@ var (
 	procTerminateJobObject       = modkernel32.NewProc("TerminateJobObject")
 )
 
-const (
-	handleFlagInherit = 0x00000001
-)
+const handleFlagInherit = 0x00000001
 
 // JOBOBJECT_BASIC_LIMIT_INFORMATION + IO counters, matching the public SDK
 // layout of JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
@@ -194,9 +192,8 @@ func AssignProcessToJob(job, process Handle) error {
 }
 
 // MakeHandleInheritable allows a detached child to keep the Job Object alive
-// after bindmount exits. The child and its descendants inherit the handle;
-// when the workload ends, the last handle closes and KILL_ON_JOB_CLOSE tears
-// down the silo.
+// after bindmount exits. Descendants keep it only when their creator enables
+// handle inheritance; a dedicated keeper is needed for stronger guarantees.
 func MakeHandleInheritable(handle Handle) error {
 	r, _, callErr := procSetHandleInformation.Call(
 		uintptr(handle), handleFlagInherit, handleFlagInherit)

@@ -26,6 +26,29 @@ const (
 // error; the syscall package does not export this constant.
 const waitFailed = 0xFFFFFFFF
 
+// errorInvalidParameter is the Win32 ERROR_INVALID_PARAMETER value returned
+// when a silo job is rejected in PROC_THREAD_ATTRIBUTE_JOB_LIST.
+const errorInvalidParameter syscall.Errno = 87
+
+// siloFallbackError marks a primary launch failure for which no process was
+// created and the suspended-create + AssignProcessToJob fallback is safe. It
+// is deliberately limited to failures caused by the JOB_LIST launch path.
+type siloFallbackError struct {
+	err error
+}
+
+func (e *siloFallbackError) Error() string { return e.err.Error() }
+func (e *siloFallbackError) Unwrap() error { return e.err }
+
+func allowSiloFallback(err error) error {
+	return &siloFallbackError{err: err}
+}
+
+func shouldFallbackSiloLaunch(err error) bool {
+	var fallbackErr *siloFallbackError
+	return errors.As(err, &fallbackErr)
+}
+
 func inheritStandardHandles(si *syscall.StartupInfo) {
 	in, inErr := syscall.GetStdHandle(stdInputHandle)
 	out, outErr := syscall.GetStdHandle(stdOutputHandle)
@@ -66,11 +89,11 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 	var attrSize uintptr
 	winapi.InitializeProcThreadAttributeList(nil, attrCount, 0, &attrSize)
 	if attrSize == 0 {
-		return 0, errors.New("InitializeProcThreadAttributeList reported zero size")
+		return 0, allowSiloFallback(errors.New("InitializeProcThreadAttributeList reported zero size"))
 	}
 	attrList := winapi.ProcThreadAttributeList(make([]byte, attrSize))
 	if err := winapi.InitializeProcThreadAttributeList(attrList, attrCount, 0, &attrSize); err != nil {
-		return 0, fmt.Errorf("InitializeProcThreadAttributeList: %w", err)
+		return 0, allowSiloFallback(fmt.Errorf("InitializeProcThreadAttributeList: %w", err))
 	}
 	defer winapi.DeleteProcThreadAttributeList(attrList)
 
@@ -82,7 +105,7 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 		unsafe.Pointer(&jobHandle),
 		unsafe.Sizeof(jobHandle),
 	); err != nil {
-		return 0, fmt.Errorf("UpdateProcThreadAttribute(JOB_LIST): %w", err)
+		return 0, allowSiloFallback(fmt.Errorf("UpdateProcThreadAttribute(JOB_LIST): %w", err))
 	}
 
 	// Apply process hardening: reject remote-image loads and block legacy
@@ -136,7 +159,11 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 		&pi,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("CreateProcess(%q): %w", cmdLine, err)
+		createErr := fmt.Errorf("CreateProcess(%q): %w", cmdLine, err)
+		if errors.Is(err, errorInvalidParameter) {
+			return 0, allowSiloFallback(createErr)
+		}
+		return 0, createErr
 	}
 	defer syscall.CloseHandle(pi.Thread)
 	defer syscall.CloseHandle(pi.Process)

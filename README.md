@@ -121,8 +121,10 @@ It won't install a bunch of runtimes or consume a lot of RAM on your machine.
 
 The GUI uses `exec --detach` automatically. In detached mode, `bindmount.exe`
 creates the silo and launches the requested command, then exits; the command
-inherits the Job Object handle and therefore keeps the silo alive until the
-workload exits.
+inherits the Job Object handle and therefore keeps the silo alive. A descendant
+keeps the silo alive only if its creator also enables handle inheritance. If the
+direct command exits without passing the handle on, Windows closes the last job
+handle and terminates the remaining silo processes.
 
 ### Global mappings
 

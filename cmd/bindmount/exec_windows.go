@@ -26,6 +26,10 @@ func validPassthroughName(name string) bool {
 	}
 }
 
+func shouldShowSkippedMappingWarnings(detach, verbose bool) bool {
+	return !detach || verbose
+}
+
 // cmdExec implements: bindmount exec [--detach] [--root data-dir] [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 //
 // It creates a job object, promotes it to a silo, optionally creates
@@ -40,11 +44,6 @@ func cmdExec(args []string) error {
 	return cmdExecInner(args)
 }
 
-// execRestores holds renamed app execution aliases pending restoration. Set
-// by createSiloLink; restored by cmdExecInner when an attached run exits.
-// Detached runs keep the rename so the block persists.
-var execRestores []aliasRestore
-
 func cmdExecInner(args []string) (err error) {
 	// Split at "--": before it are our flags, after it the command.
 	var ourArgs, cmdArgs []string
@@ -56,12 +55,7 @@ func cmdExecInner(args []string) (err error) {
 		}
 	}
 	if cmdArgs == nil {
-		// No "--" separator: first arg is the job name, rest is the command.
-		if len(args) < 2 {
-			return errors.New("usage: " + execUsage)
-		}
-		ourArgs = args[:1]
-		cmdArgs = args[1:]
+		return errors.New(`exec requires "--" before the child command (usage: ` + execUsage + ")")
 	}
 	detach := false
 	rootDir := ""
@@ -119,6 +113,7 @@ func cmdExecInner(args []string) (err error) {
 			}
 		}
 	}
+	showSkippedWarnings := shouldShowSkippedMappingWarnings(detach, verbose)
 	executablePath := ""
 	if passthrough["executable"] {
 		executablePath, err = passthroughExecutable(cmdArgs[0])
@@ -126,7 +121,7 @@ func cmdExecInner(args []string) (err error) {
 			return fmt.Errorf("locate executable for passthrough %q: %w", cmdArgs[0], err)
 		}
 	}
-	if existing, openErr := winapi.OpenJob(jobName, winapi.JOB_OBJECT_ALL_ACCESS); openErr == nil {
+	if existing, openErr := openSiloJob(jobName, winapi.JOB_OBJECT_ALL_ACCESS); openErr == nil {
 		syscall.CloseHandle(existing)
 		return fmt.Errorf("silo %q already exists", jobName)
 	} else if !errors.Is(openErr, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(openErr, syscall.ERROR_PATH_NOT_FOUND) {
@@ -145,8 +140,9 @@ func cmdExecInner(args []string) (err error) {
 	}
 
 	// Job limits:
-	//  - KILL_ON_JOB_CLOSE tears the whole silo down when exec exits, so the
-	//    command cannot outlive the tool.
+	//  - KILL_ON_JOB_CLOSE is required by JobObjectCreateSilo. Attached runs
+	//    keep the handle here; detached runs pass an inheritable handle to the
+	//    launched process so the silo survives bindmount exiting.
 	//  - Both breakaway limits are deliberately absent: without
 	//    JOB_OBJECT_LIMIT_BREAKAWAY_OK, a child created with
 	//    CREATE_BREAKAWAY_FROM_JOB is denied breakaway, so the process tree
@@ -169,17 +165,17 @@ func cmdExecInner(args []string) (err error) {
 	}
 	mappedPassthrough := make(map[string]bool)
 	if rootDir != "" {
-		if err := createRootMappings(job, rootDir, mappedPassthrough, verbose); err != nil {
+		if err := createRootMappings(job, rootDir, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if readOnlyRoot {
-		if err := createReadOnlyRootMappings(job, mappedPassthrough, verbose); err != nil {
+		if err := createReadOnlyRootMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if passthrough["path"] {
-		if err := createPathMappings(job, mappedPassthrough, verbose); err != nil {
+		if err := createPathMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -188,27 +184,27 @@ func cmdExecInner(args []string) (err error) {
 		if err != nil {
 			return fmt.Errorf("get current working directory: %w", err)
 		}
-		if err := createWorkingDirectoryMapping(job, workingDir, mappedPassthrough, verbose); err != nil {
+		if err := createWorkingDirectoryMapping(job, workingDir, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if passthrough["gitroot"] {
-		if err := createGitRootMapping(job, mappedPassthrough, verbose); err != nil {
+		if err := createGitRootMapping(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if passthrough["appstate"] {
-		if err := createAppStateMappings(job, mappedPassthrough, verbose); err != nil {
+		if err := createAppStateMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if passthrough["appexec"] {
-		if err := createAppExecMappings(job, mappedPassthrough, verbose); err != nil {
+		if err := createAppExecMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	if passthrough["executable"] {
-		if err := createExecutableMapping(job, executablePath, mappedPassthrough, verbose); err != nil {
+		if err := createExecutableMapping(job, executablePath, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -216,49 +212,36 @@ func cmdExecInner(args []string) (err error) {
 	// Optional mapping: PowerShell profile/history and TEMP for WLDP script trust.
 	// Enabled with --passthrough powershell.
 	if passthrough["powershell"] {
-		if err := createPowerShellMappings(job, mappedPassthrough, verbose); err != nil {
+		if err := createPowerShellMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
-		if err := createTempMapping(job, mappedPassthrough, verbose); err != nil {
+		if err := createTempMapping(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 
 	// Create any requested silo-scoped links before launching the process.
 	for _, l := range linkSpecs {
-		if err := createSiloLink(job, l, mappedPassthrough, verbose); err != nil {
+		if err := createSiloLink(job, l, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	exitCode, err := runInSilo(job, cmdArgs, detach, "")
-	// Package identity is intentionally not resolved here. resolvePackageName
-	// can detect MSIX aliases, but PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME
-	// combined with a silo job in the attribute list is rejected on build 26100
-	// (the same limitation that forces the fallback below). The fallback path
-	// likewise launches without a package identity.
-	if err != nil {
-		// If CreateProcess with PROC_THREAD_ATTRIBUTE_JOB_LIST fails (observed
-		// on build 26100 with ERROR_INVALID_PARAMETER for a silo job), fall
-		// back to creating the process suspended and assigning it to the job.
+	// Package identity is intentionally not supplied: combining
+	// PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME with a silo job in the attribute
+	// list is rejected on build 26100. The fallback path likewise launches
+	// without a package identity.
+	if shouldFallbackSiloLaunch(err) {
+		// If the JOB_LIST launch path is unavailable (observed on build 26100
+		// as CreateProcess returning ERROR_INVALID_PARAMETER for a silo job),
+		// create the process suspended and assign it to the job instead.
 		exitCode, err = runInSiloFallback(job, cmdArgs, detach)
-		if err != nil {
-			return err
-		}
 	}
-	// Restore renamed app execution aliases before propagating the exit code.
-	// Detached runs keep the rename (the block is meant to outlive the
-	// supervisor), so only restore for attached runs; exitWith calls os.Exit,
-	// which skips deferred functions.
+	if err != nil {
+		return err
+	}
 	if !detach && exitCode != 0 {
-		if execRestores != nil {
-			restoreAliases(execRestores)
-			execRestores = nil
-		}
 		exitWith(exitCode)
-	}
-	if !detach && execRestores != nil {
-		restoreAliases(execRestores)
-		execRestores = nil
 	}
 	return nil
 }
@@ -271,7 +254,18 @@ func passthroughExecutable(command string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[string]bool, verbose bool) error {
+func warnSkippedMapping(enabled bool, kind, root, target, reason string) {
+	if !enabled {
+		return
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "bindmount: warning: skipping %s mapping %s: %s\n", kind, root, reason)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "bindmount: warning: skipping %s mapping %s -> %s: %s\n", kind, root, target, reason)
+}
+
+func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	path = filepath.Clean(path)
 	if path == "." || path == "" {
 		return nil
@@ -282,6 +276,7 @@ func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[
 	}
 	key := strings.ToLower(path)
 	if mapped[key] {
+		warnSkippedMapping(showSkippedWarnings, name+" passthrough", path, path, "virtual root is already mapped")
 		return nil
 	}
 	if err := bindfilter.CreateSilo(job, path, path, bindfilter.Options{}); err != nil {
@@ -294,7 +289,7 @@ func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[
 	return nil
 }
 
-func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	seen := make(map[string]bool)
 	for _, entry := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
 		path := filepath.Clean(strings.Trim(entry, `"`))
@@ -306,14 +301,14 @@ func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose bool
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if err := createPassthroughMapping(job, "path", path, mapped, verbose); err != nil {
+		if err := createPassthroughMapping(job, "path", path, mapped, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	seen := make(map[string]bool)
 	for _, item := range []struct{ name, value string }{
 		{"appdata", os.Getenv("APPDATA")},
@@ -326,7 +321,7 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 			continue
 		}
 		seen[key] = true
-		if err := createPassthroughMapping(job, item.name, path, mapped, verbose); err != nil {
+		if err := createPassthroughMapping(job, item.name, path, mapped, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -345,37 +340,36 @@ func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose 
 //
 // Both paths are silently skipped when the environment variable is absent or
 // the path does not exist, keeping the function safe to call unconditionally.
-func createPowerShellMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
-	appdata := os.Getenv("APPDATA")
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if appdata == "" && localAppData == "" {
-		return nil
-	}
+type namedMappingPath struct {
+	name, path string
+}
 
-	items := []struct {
-		name, path string
-	}{
-		{
-			"powershell-history",
-			filepath.Join(appdata, `Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`),
-		},
-		{
-			"powershell-local",
-			filepath.Join(localAppData, `Microsoft\PowerShell`),
-		},
+func powerShellMappingPaths(appdata, localAppData string) []namedMappingPath {
+	items := make([]namedMappingPath, 0, 2)
+	if appdata != "" {
+		items = append(items, namedMappingPath{
+			name: "powershell-history",
+			path: filepath.Clean(filepath.Join(appdata, `Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`)),
+		})
 	}
+	if localAppData != "" {
+		items = append(items, namedMappingPath{
+			name: "powershell-local",
+			path: filepath.Clean(filepath.Join(localAppData, `Microsoft\PowerShell`)),
+		})
+	}
+	return items
+}
 
-	for _, item := range items {
-		if item.path == "" {
-			continue
-		}
+func createPowerShellMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
+	for _, item := range powerShellMappingPaths(os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")) {
 		if _, err := os.Stat(item.path); err != nil {
 			// Path does not exist yet — skip silently. PSReadLine creates the
 			// history file on first use; the local cache dir is created by
 			// PowerShell on first launch.
 			continue
 		}
-		if err := createPassthroughMapping(job, item.name, item.path, mapped, verbose); err != nil {
+		if err := createPassthroughMapping(job, item.name, item.path, mapped, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -387,7 +381,7 @@ func createPowerShellMappings(job syscall.Handle, mapped map[string]bool, verbos
 // when evaluating PowerShell profile and script trust; without write access
 // the trust check fails and the session enters Constrained Language Mode.
 // The mapping is always installed regardless of --root / --readonly-root.
-func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	temp := os.Getenv("TEMP")
 	if temp == "" {
 		temp = os.Getenv("TMP")
@@ -395,7 +389,7 @@ func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose bool)
 	if temp == "" {
 		return nil
 	}
-	return createPassthroughMapping(job, "temp", temp, mapped, verbose)
+	return createPassthroughMapping(job, "temp", temp, mapped, verbose, showSkippedWarnings)
 }
 
 // createAppExecMappings resolves every App Execution Alias (.exe reparse
@@ -413,7 +407,7 @@ func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose bool)
 // The WindowsApps directory itself is silently skipped if it cannot be read
 // or if none of its entries carry an APPEXECLINK reparse tag; this keeps
 // appexec opt-in and non-fatal.
-func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
 		return nil
@@ -429,7 +423,7 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 	// Passthrough the alias directory itself so PATH-based lookup can reach
 	// the individual alias files inside it even when --root has shadowed the
 	// drive with an empty backing tree.
-	if err := createPassthroughMapping(job, "appexec", windowsAppsDir, mapped, verbose); err != nil {
+	if err := createPassthroughMapping(job, "appexec", windowsAppsDir, mapped, verbose, showSkippedWarnings); err != nil {
 		return err
 	}
 
@@ -456,7 +450,7 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		// shadowed by an empty backing tree. Best-effort: an alias whose
 		// package folder was removed by an app update (stale reparse data)
 		// is skipped rather than aborting the whole appexec pass.
-		if err := createPassthroughMapping(job, "appexec", filepath.Dir(realExe), mapped, verbose); err != nil {
+		if err := createPassthroughMapping(job, "appexec", filepath.Dir(realExe), mapped, verbose, showSkippedWarnings); err != nil {
 			if verbose {
 				fmt.Printf("bindmount: appexec package %s: %v (skipped)\n", filepath.Dir(realExe), err)
 			}
@@ -467,10 +461,10 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 		// their writable state under %LOCALAPPDATA%\Packages\<family>; without
 		// it winget fails at startup with 0x80073db8 (state store load). The
 		// family name is string[0] of the reparse payload, already decoded above.
-		if info.PackageFullName != "" {
-			stateDir := filepath.Join(localAppData, "Packages", info.PackageFullName)
+		if info.PackageFamilyName != "" {
+			stateDir := filepath.Join(localAppData, "Packages", info.PackageFamilyName)
 			if stat, err := os.Stat(stateDir); err == nil && stat.IsDir() {
-				if err := createPassthroughMapping(job, "appexec", stateDir, mapped, verbose); err != nil {
+				if err := createPassthroughMapping(job, "appexec", stateDir, mapped, verbose, showSkippedWarnings); err != nil {
 					if verbose {
 						fmt.Printf("bindmount: appexec state %s: %v (skipped)\n", stateDir, err)
 					}
@@ -482,7 +476,7 @@ func createAppExecMappings(job syscall.Handle, mapped map[string]bool, verbose b
 	return nil
 }
 
-func createGitRootMapping(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createGitRootMapping(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	workingDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get current working directory for gitroot passthrough: %w", err)
@@ -499,15 +493,28 @@ func createGitRootMapping(job syscall.Handle, mapped map[string]bool, verbose bo
 	if root == "" {
 		return nil
 	}
-	return createPassthroughMapping(job, "gitroot", root, mapped, verbose)
+	return createPassthroughMapping(job, "gitroot", root, mapped, verbose, showSkippedWarnings)
 }
 
-func createExecutableMapping(job syscall.Handle, executablePath string, mapped map[string]bool, verbose bool) error {
+func createExecutableMapping(job syscall.Handle, executablePath string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	virtualRoot := filepath.Dir(executablePath)
-	return createPassthroughMapping(job, "executable", virtualRoot, mapped, verbose)
+	return createPassthroughMapping(job, "executable", virtualRoot, mapped, verbose, showSkippedWarnings)
 }
 
-func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bool, verbose bool) error {
+func profileRelativeForDrive(profile string, letter rune) (string, bool) {
+	if profile == "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(profile)
+	volume := filepath.VolumeName(cleaned)
+	if !strings.EqualFold(volume, fmt.Sprintf("%c:", letter)) {
+		return "", false
+	}
+	relative := strings.TrimLeft(cleaned[len(volume):], `\`)
+	return relative, relative != ""
+}
+
+func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	if dataDir == "" {
 		return errors.New("root data directory is required")
 	}
@@ -521,25 +528,16 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("create root backing %s: %w", target, err)
 		}
-		// Pre-create the current profile's relative directory in the C: backing
+		// Pre-create the current profile's relative directory in its drive's backing
 		// tree without installing a corresponding bind link. This preserves the
 		// normal profile directory and its NTFS short-name alias in root mode.
-		if letter == 'C' {
-			if profile := os.Getenv("USERPROFILE"); profile != "" {
-				// Guard against UNC profiles (\\server\share\...): VolumeName
-				// returns "\\server\share" for those, not a two-char drive spec.
-				vol := filepath.VolumeName(profile)
-				if len(vol) == 2 {
-					profileRelative := strings.TrimLeft(filepath.Clean(profile)[len(vol):], `\`)
-					if profileRelative != "" {
-						if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
-							return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
-						}
-					}
-				}
+		if profileRelative, ok := profileRelativeForDrive(os.Getenv("USERPROFILE"), letter); ok {
+			if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
+				return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
 			}
 		}
 		if mapped[strings.ToLower(root)] {
+			warnSkippedMapping(showSkippedWarnings, "root", root, target, "virtual root is already mapped")
 			continue
 		}
 		if err := bindfilter.CreateSilo(job, root, target, bindfilter.Options{}); err != nil {
@@ -557,7 +555,7 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 // onto itself, read-only. Unlike --root there is no backing tree: each drive
 // keeps its real contents inside the silo but rejects writes. Mutually
 // exclusive with --root.
-func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verbose bool) error {
+func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	drives, err := winapi.LogicalDriveLetters()
 	if err != nil {
 		return fmt.Errorf("enumerate drives for read-only root mappings: %w", err)
@@ -565,6 +563,7 @@ func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verb
 	for _, letter := range drives {
 		root := fmt.Sprintf("%c:\\", letter)
 		if mapped[strings.ToLower(root)] {
+			warnSkippedMapping(showSkippedWarnings, "read-only root", root, root, "virtual root is already mapped")
 			continue
 		}
 		if err := bindfilter.CreateSilo(job, root, root, bindfilter.Options{ReadOnly: true}); err != nil {
@@ -577,15 +576,16 @@ func createReadOnlyRootMappings(job syscall.Handle, mapped map[string]bool, verb
 	}
 	return nil
 }
+
 // createWorkingDirectoryMapping exposes the launcher's current working
 // directory inside the silo. This supplements --root mode: the cwd is
 // already reachable when it lies under a drive that has been passed through,
 // but is installed as an explicit narrow mapping when --root has shadowed
 // that drive with an empty backing tree. A drive root needs no narrower
 // mapping because it is already the root mapping.
-func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, mapped map[string]bool, verbose bool) error {
+func createWorkingDirectoryMapping(job syscall.Handle, workingDir string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	workingDir = filepath.Clean(workingDir)
-	return createPassthroughMapping(job, "cwd", workingDir, mapped, verbose)
+	return createPassthroughMapping(job, "cwd", workingDir, mapped, verbose, showSkippedWarnings)
 }
 
 type linkSpec struct {
@@ -648,95 +648,19 @@ func splitLinkSpec(s string) (root, target string, readOnly, merged, ok bool) {
 	return root, s[separatorIndex+len(separator):], readOnly, merged, true
 }
 
-// isAppExecAlias reports whether path is an app execution alias: a 0-byte
-// file carrying an APPEXECLINK reparse point, as found under
-// %LOCALAPPDATA%\Microsoft\WindowsApps.
-func isAppExecAlias(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || info.Size() != 0 || info.IsDir() {
-		return false
-	}
-	_, err = winapi.ReadAppExecLinkInfo(path)
-	return err == nil
-}
-
-// restoreAliases renames blocked app execution aliases back to their
-// original names, best-effort. Aliases renamed by other means (a GUI
-// restore, or a tool crash before this ran) are recreated by Windows when
-// the owning app is reinstalled or updated; they can also be renamed back by
-// removing the ".bindmount-blocked" suffix.
-func restoreAliases(restores []aliasRestore) {
-	for i := len(restores) - 1; i >= 0; i-- {
-		if err := os.Rename(restores[i].from, restores[i].to); err != nil {
-			fmt.Fprintf(os.Stderr, "bindmount: restore alias %s: %v\n", restores[i].to, err)
-		}
-	}
-}
-
-// resolvePackageName looks up cmdArgs[0] in PATH and, if it resolves to an
-// App Execution Alias under WindowsApps, returns its MSIX package full name
-// for use with PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME. Returns empty string
-// if the command is not a packaged app or the alias cannot be read.
-func resolvePackageName(cmdArgs []string) string {
-	if len(cmdArgs) == 0 {
-		return ""
-	}
-	resolved, err := osExec.LookPath(cmdArgs[0])
-	if err != nil {
-		return ""
-	}
-	resolved = filepath.Clean(resolved)
-	localAppData := os.Getenv("LOCALAPPDATA")
-	if localAppData == "" {
-		return ""
-	}
-	windowsAppsDir := strings.ToLower(filepath.Join(localAppData, "Microsoft", "WindowsApps"))
-	if !strings.HasPrefix(strings.ToLower(resolved), windowsAppsDir) {
-		return ""
-	}
-	info, err := winapi.ReadAppExecLinkInfo(resolved)
-	if err != nil || info == nil {
-		return ""
-	}
-	return info.PackageFullName
-}
-
-// aliasRestore records a renamed app execution alias so exec can put it back
-// when the launched command exits.
-type aliasRestore struct {
-	from, to string
-}
-
-func createSiloLink(job syscall.Handle, l linkSpec, mapped map[string]bool, verbose bool) error {
+func createSiloLink(job syscall.Handle, l linkSpec, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	key := strings.ToLower(filepath.Clean(l.root))
 	if mapped[key] {
+		warnSkippedMapping(showSkippedWarnings, "user", l.root, l.target, "virtual root is already mapped")
 		return nil
 	}
 	// Anchoring a mapping on an app execution alias (0-byte APPEXECLINK
 	// reparse point, e.g. the wsl.exe alias under WindowsApps) fails with
-	// "The file cannot be accessed by the system". A bind link cannot shadow
-	// such an alias; rename it aside instead so the shell reports the command
-	// as not found.
+	// "The file cannot be accessed by the system", so skip that link.
 	info, err := os.Lstat(l.root)
 	if err == nil && info.Size() == 0 && !info.IsDir() {
 		if _, err := winapi.ReadAppExecLinkInfo(l.root); err == nil {
-			// A regular 0-byte file has no reparse data; only an app
-			// execution alias parses as APPEXECLINK. The rename is
-			// permanent: the alias is restored only for attached runs,
-			// and Windows recreates it on app reinstall/update.
-			blocked := l.root + ".bindmount-blocked"
-			if _, err := os.Stat(blocked); err == nil {
-				if err := os.Remove(blocked); err != nil {
-					return fmt.Errorf("remove stale blocked alias %s: %w", blocked, err)
-				}
-			}
-			if err := os.Rename(l.root, blocked); err != nil {
-				return fmt.Errorf("block app execution alias %s: %w", l.root, err)
-			}
-			execRestores = append(execRestores, aliasRestore{from: blocked, to: l.root})
-			if verbose {
-				fmt.Printf("bindmount: renamed app execution alias %s -> %s\n", l.root, blocked)
-			}
+			warnSkippedMapping(showSkippedWarnings, "user", l.root, l.target, "app execution aliases cannot be mapped")
 			mapped[key] = true
 			return nil
 		}

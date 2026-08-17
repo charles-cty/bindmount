@@ -21,11 +21,9 @@ var (
 	loadErr       error
 	modbindfltapi *syscall.DLL
 
-	procBfSetupFilter     *syscall.Proc
-	procBfRemoveMapping   *syscall.Proc
-	procBfGetMappings     *syscall.Proc
-	procBfSetupFilterEx   *syscall.Proc
-	procBfRemoveMappingEx *syscall.Proc
+	procBfSetupFilter   *syscall.Proc
+	procBfRemoveMapping *syscall.Proc
+	procBfGetMappings   *syscall.Proc
 )
 
 // loadBindfltapi loads bindfltapi.dll from System32 and resolves the exports
@@ -74,10 +72,6 @@ func doLoadBindfltapi() error {
 	if procBfGetMappings, err = lookup("BfGetMappings"); err != nil {
 		return ErrBindfltUnavailable
 	}
-	// The Ex variants are optional (build 26100+); absence is not fatal.
-	procBfSetupFilterEx, _ = lookup("BfSetupFilterEx")
-	procBfRemoveMappingEx, _ = lookup("BfRemoveMappingEx")
-
 	modbindfltapi = dll
 	return nil
 }

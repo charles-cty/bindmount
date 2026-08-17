@@ -64,12 +64,19 @@ const (
 
 // AppExecLinkInfo holds the decoded payload of an APPEXECLINK reparse point.
 type AppExecLinkInfo struct {
-	PackageFullName string // string[0]: e.g. "Microsoft.DesktopAppInstaller_1.29.280.0_x64__8wekyb3d8bbwe"
-	ExePath         string // string[2]: real executable path
+	PackageFamilyName string // string[0]: e.g. "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe"
+	ExePath           string // string[2]: real executable path
+}
+
+func appExecLinkInfoFromStrings(strs []string) *AppExecLinkInfo {
+	return &AppExecLinkInfo{
+		PackageFamilyName: strs[0],
+		ExePath:           strs[appExecLinkExeStringIdx],
+	}
 }
 
 // ReadAppExecLinkInfo reads the full APPEXECLINK reparse data from path and
-// returns the package full name (string[0]) and real executable path (string[2]).
+// returns the package family name (string[0]) and real executable path (string[2]).
 func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 	p16, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
@@ -120,10 +127,7 @@ func ReadAppExecLinkInfo(path string) (*AppExecLinkInfo, error) {
 		return nil, fmt.Errorf("%q: APPEXECLINK has only %d strings, need at least %d",
 			path, len(strs), appExecLinkExeStringIdx+1)
 	}
-	return &AppExecLinkInfo{
-		PackageFullName: strs[0],
-		ExePath:         strs[appExecLinkExeStringIdx],
-	}, nil
+	return appExecLinkInfoFromStrings(strs), nil
 }
 
 // ReadAppExecLink is a convenience wrapper that returns only the real

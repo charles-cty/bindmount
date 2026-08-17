@@ -3,7 +3,12 @@
 package bindfilter
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"bindmount/internal/winapi"
 )
 
 // These tests validate the offline-checkable parts of the package: option
@@ -74,64 +79,101 @@ func TestRemoveSiloValidatesArgs(t *testing.T) {
 	}
 }
 
-func TestIsFileLevelMappingEdgeCases(t *testing.T) {
-	cases := []struct {
-		name        string
-		virtualRoot string
-		target      string
-		want        bool
-	}{
-		// Multiple dots — only the last component matters.
-		{"multiple dots in name", `C:\foo\bar.bak.exe`, `C:\baz\other.exe`, true},
-		// Dotfile (leading dot, no further extension) — not a file extension.
-		{"dotfile no ext", `C:\foo\.gitignore`, `C:\bar\.gitignore`, false},
-		// Path with spaces.
-		{"spaces in path", `C:\Program Files\app\tool.exe`, `C:\Backup\tool.exe`, true},
-		// Extension on intermediate component, not the last.
-		{"ext only on intermediate", `C:\foo.d\bar`, `C:\baz.d\bin`, false},
-		// Empty paths — no extension, treated as directory.
-		{"empty paths", "", "", false},
-		// Target is a bare volume root.
-		{"target volume root", `C:\foo\bar.exe`, `C:\`, false},
+func TestTargetFileLevel(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "release.1")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := isFileLevelMapping(c.virtualRoot, c.target)
-			if got != c.want {
-				t.Fatalf("isFileLevelMapping(%q, %q) = %v, want %v",
-					c.virtualRoot, c.target, got, c.want)
-			}
-		})
+	file := filepath.Join(t.TempDir(), "no-extension")
+	if err := os.WriteFile(file, []byte("test"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, known := targetFileLevel(dir); got || !known {
+		t.Fatalf("dotted directory classified as file=%v known=%v", got, known)
+	}
+	if got, known := targetFileLevel(file); !got || !known {
+		t.Fatalf("extensionless file classified as file=%v known=%v", got, known)
+	}
+	if got, known := targetFileLevel(filepath.Join(t.TempDir(), "missing.exe")); got || known {
+		t.Fatalf("missing dotted target classified as file=%v known=%v", got, known)
 	}
 }
 
-func TestIsFileLevelMapping(t *testing.T) {
+func TestSetupMappingRetriesUnknownTargetAsFile(t *testing.T) {
+	firstErr := errors.New("directory mapping rejected")
+	var calls []uint32
+	setup := func(_ winapi.Handle, flags uint32, _, _ string, _ []string) error {
+		calls = append(calls, flags)
+		if len(calls) == 1 {
+			return firstErr
+		}
+		return nil
+	}
+
+	baseFlags := uint32(winapi.BINDFLT_FLAG_USE_CURRENT_SILO_MAPPING)
+	err := setupMapping(setup, 1, baseFlags, `C:\virtual\tool.exe`, `C:\missing\tool.exe`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("setup calls = %d, want 2", len(calls))
+	}
+	if calls[0] != baseFlags {
+		t.Fatalf("first flags = 0x%X, want 0x%X", calls[0], baseFlags)
+	}
+	wantRetry := baseFlags | winapi.BINDFLT_FLAG_REPARSE_ON_FILES
+	if calls[1] != wantRetry {
+		t.Fatalf("retry flags = 0x%X, want 0x%X", calls[1], wantRetry)
+	}
+}
+
+func TestSetupMappingDoesNotRetryKnownDirectory(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "release.1")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("setup failed")
+	calls := 0
+	setup := func(_ winapi.Handle, flags uint32, _, _ string, _ []string) error {
+		calls++
+		if flags&winapi.BINDFLT_FLAG_REPARSE_ON_FILES != 0 {
+			t.Fatalf("known directory received REPARSE_ON_FILES: 0x%X", flags)
+		}
+		return wantErr
+	}
+
+	err := setupMapping(setup, 1, 0, `C:\virtual\release.1`, target, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+	if calls != 1 {
+		t.Fatalf("setup calls = %d, want 1", calls)
+	}
+}
+
+func TestNextMappingsBufferSize(t *testing.T) {
 	cases := []struct {
-		name        string
-		virtualRoot string
-		target      string
-		want        bool
+		name     string
+		current  int
+		reported uint32
+		want     int
+		wantErr  bool
 	}{
-		// Target has a file extension — detected via heuristic when stat fails
-		// (stat will fail because these paths don't exist on the test machine).
-		{"exe target", `C:\foo\bar.exe`, `C:\baz\other.exe`, true},
-		{"dll target", `C:\foo\helper`, `C:\baz\lib.dll`, true},
-		// Only the virtual root has an extension and target doesn't — still
-		// treated as file-level because either path triggers the heuristic.
-		{"root has ext, target dir-like", `C:\foo\bar.exe`, `C:\baz\bin`, true},
-		// Neither path has an extension — treated as directory mapping.
-		{"both dir-like", `C:\foo\bar`, `C:\baz\bin`, false},
-		// Bare directory paths.
-		{"directories with slash", `C:\foo\`, `C:\bar\`, false},
-		// Single-component file names.
-		{"single component file", `bar.exe`, `other.exe`, true},
+		{"uses reported size", 64 << 10, 200 << 10, 200 << 10, false},
+		{"doubles stale size", 64 << 10, 64 << 10, 128 << 10, false},
+		{"allows exact limit", 8 << 20, maxMappingsBufferSize, maxMappingsBufferSize, false},
+		{"rejects huge report", 64 << 10, ^uint32(0), 0, true},
+		{"rejects doubling past limit", maxMappingsBufferSize, maxMappingsBufferSize, 0, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := isFileLevelMapping(c.virtualRoot, c.target)
+			got, err := nextMappingsBufferSize(c.current, c.reported)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, c.wantErr)
+			}
 			if got != c.want {
-				t.Fatalf("isFileLevelMapping(%q, %q) = %v, want %v",
-					c.virtualRoot, c.target, got, c.want)
+				t.Fatalf("size = %d, want %d", got, c.want)
 			}
 		})
 	}

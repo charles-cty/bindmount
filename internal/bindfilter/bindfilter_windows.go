@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -34,27 +33,36 @@ func (o Options) setupFlags(scopeFlags uint32) uint32 {
 	return flags
 }
 
-// isFileLevelMapping reports whether the virtual root and target describe a
-// file-to-file mapping rather than a directory-to-directory one. File-level
-// mappings require BINDFLT_FLAG_REPARSE_ON_FILES; without it, BfSetupFilter
-// rejects them on some Windows builds.
-//
-// Detection priority:
-//  1. os.Stat the target — if accessible and not a directory, it is a file.
-//  2. Fallback: treat either path as a file when its last component contains
-//     a dot (i.e. has a file extension). This handles targets in ACL-restricted
-//     directories (e.g. C:\Program Files\WindowsApps) where stat would fail.
-func isFileLevelMapping(virtualRoot, target string) bool {
+// targetFileLevel classifies an accessible target. An inaccessible target is
+// left unknown rather than guessed from its extension: dotted directory names
+// are valid and must not receive REPARSE_ON_FILES merely because Stat failed.
+func targetFileLevel(target string) (file, known bool) {
 	if info, err := os.Stat(target); err == nil {
-		return !info.IsDir()
+		return !info.IsDir(), true
 	}
-	// Fallback: extension heuristic on both paths.
-	hasExt := func(p string) bool {
-		base := filepath.Base(p)
-		dot := strings.LastIndexByte(base, '.')
-		return dot > 0 && dot < len(base)-1
+	return false, false
+}
+
+type setupFilterFunc func(job winapi.Handle, flags uint32, virtualRoot, target string, exceptions []string) error
+
+func setupMapping(setup setupFilterFunc, job winapi.Handle, flags uint32, virtualRoot, target string, exceptions []string) error {
+	file, known := targetFileLevel(target)
+	if file {
+		flags |= winapi.BINDFLT_FLAG_REPARSE_ON_FILES
 	}
-	return hasExt(target) || hasExt(virtualRoot)
+	err := setup(job, flags, virtualRoot, target, exceptions)
+	if err == nil || known {
+		return err
+	}
+
+	// Stat could not classify the target. Retry as a file only after the
+	// directory-style call fails; this supports ACL-restricted file targets
+	// without misclassifying inaccessible dotted directories up front.
+	retryErr := setup(job, flags|winapi.BINDFLT_FLAG_REPARSE_ON_FILES, virtualRoot, target, exceptions)
+	if retryErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%w (retry with BINDFLT_FLAG_REPARSE_ON_FILES failed: %v)", err, retryErr)
 }
 
 // CreateGlobal creates a mapping visible to all processes on the host.
@@ -64,10 +72,7 @@ func CreateGlobal(virtualRoot, target string, opts Options) error {
 		return errors.New("virtual root and target are required")
 	}
 	flags := opts.setupFlags(winapi.BINDFLT_FLAG_NO_MULTIPLE_TARGETS)
-	if isFileLevelMapping(virtualRoot, target) {
-		flags |= winapi.BINDFLT_FLAG_REPARSE_ON_FILES
-	}
-	return winapi.SetupFilter(0, flags, virtualRoot, target, opts.Exceptions)
+	return setupMapping(winapi.SetupFilter, 0, flags, virtualRoot, target, opts.Exceptions)
 }
 
 // RemoveGlobal removes a global mapping by virtual root.
@@ -88,10 +93,7 @@ func CreateSilo(job winapi.Handle, virtualRoot, target string, opts Options) err
 		return errors.New("virtual root and target are required")
 	}
 	flags := opts.setupFlags(winapi.BINDFLT_FLAG_USE_CURRENT_SILO_MAPPING)
-	if isFileLevelMapping(virtualRoot, target) {
-		flags |= winapi.BINDFLT_FLAG_REPARSE_ON_FILES
-	}
-	return winapi.SetupFilter(job, flags, virtualRoot, target, opts.Exceptions)
+	return setupMapping(winapi.SetupFilter, job, flags, virtualRoot, target, opts.Exceptions)
 }
 
 // RemoveSilo removes the mapping for virtualRoot in the scope of job.
@@ -139,6 +141,19 @@ func ListSilo(job winapi.Handle) ([]Mapping, error) {
 // getMappings performs the BfGetMappings call with a grow-and-retry strategy.
 // go-winio uses a fixed 256-KB buffer; we start smaller and grow when the
 // filter reports insufficient room, as recommended in docs/BindFilterAPI.md.
+const maxMappingsBufferSize = 16 << 20
+
+func nextMappingsBufferSize(current int, reported uint32) (int, error) {
+	next := uint64(reported)
+	if next <= uint64(current) {
+		next = uint64(current) * 2
+	}
+	if next > maxMappingsBufferSize {
+		return 0, fmt.Errorf("BfGetMappings requested %d bytes, limit is %d", next, maxMappingsBufferSize)
+	}
+	return int(next), nil
+}
+
 func getMappings(flags uint32, job winapi.Handle, rootPath string) ([]winapi.Mapping, error) {
 	size := 64 * 1024
 	for attempt := 0; attempt < 4; attempt++ {
@@ -150,10 +165,10 @@ func getMappings(flags uint32, job winapi.Handle, rootPath string) ([]winapi.Map
 		if !errors.Is(err, syscall.ERROR_INSUFFICIENT_BUFFER) && !errors.Is(err, syscall.ERROR_MORE_DATA) {
 			return nil, err
 		}
-		if n <= uint32(size) {
-			n = uint32(size * 2)
+		size, err = nextMappingsBufferSize(size, n)
+		if err != nil {
+			return nil, err
 		}
-		size = int(n)
 	}
 	return nil, fmt.Errorf("BfGetMappings still reports insufficient buffer after growing to %d bytes", size)
 }
