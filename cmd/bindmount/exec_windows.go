@@ -15,7 +15,7 @@ import (
 	"bindmount/internal/winapi"
 )
 
-const execUsage = "bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]"
+const execUsage = "bindmount exec [--detach] [--verbose] [--no-ui-restrictions] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]"
 
 func validPassthroughName(name string) bool {
 	switch name {
@@ -58,6 +58,7 @@ func cmdExecInner(args []string) (err error) {
 		return errors.New(`exec requires "--" before the child command (usage: ` + execUsage + ")")
 	}
 	detach := false
+	noUIRestrictions := false
 	rootDir := ""
 	readOnlyRoot := false
 	passthrough := map[string]bool{}
@@ -68,6 +69,8 @@ func cmdExecInner(args []string) (err error) {
 		switch ourArgs[i] {
 		case "--detach":
 			detach = true
+		case "--no-ui-restrictions":
+			noUIRestrictions = true
 		case "--root":
 			if i+1 >= len(ourArgs) {
 				return errors.New("--root requires a data directory")
@@ -151,14 +154,20 @@ func cmdExecInner(args []string) (err error) {
 	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
 		return fmt.Errorf("configure job: %w", err)
 	}
-	// Prevent silo processes from changing system/display settings, creating
-	// desktops, or triggering system shutdown.
-	const siloUIRestrictions = winapi.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
-		winapi.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-		winapi.JOB_OBJECT_UILIMIT_DESKTOP |
-		winapi.JOB_OBJECT_UILIMIT_EXITWINDOWS
-	if err := winapi.SetJobUIRestrictions(job, siloUIRestrictions); err != nil {
-		return fmt.Errorf("configure job UI restrictions: %w", err)
+	if !noUIRestrictions {
+		// Prevent silo processes from changing system/display settings, creating
+		// desktops, or triggering system shutdown. Applications that create
+		// nested jobs, including Chromium's Windows sandbox, require this to be
+		// disabled because Windows does not allow UI limits in a job hierarchy.
+		const siloUIRestrictions = winapi.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
+			winapi.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+			winapi.JOB_OBJECT_UILIMIT_DESKTOP |
+			winapi.JOB_OBJECT_UILIMIT_EXITWINDOWS
+		if err := winapi.SetJobUIRestrictions(job, siloUIRestrictions); err != nil {
+			return fmt.Errorf("configure job UI restrictions: %w", err)
+		}
+	} else if verbose {
+		fmt.Println("bindmount: job UI restrictions disabled")
 	}
 	if err := winapi.PromoteToSilo(job); err != nil {
 		return fmt.Errorf("promote job to silo: %w", err)

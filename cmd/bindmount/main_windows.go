@@ -120,7 +120,7 @@ func newSiloCommand() *cobra.Command {
 func newExecCommand() *cobra.Command {
 	// exec has a command payload after `--`; leave that payload untouched so
 	// Cobra does not try to interpret the child command's own flags.
-	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", Short: "create a Job Silo and launch a command", Long: "Create a named Job Silo, optionally install root and scoped mappings, and launch a command inside it. With --root, executable, PATH, current-directory, Git-root, and app-execution-alias passthrough are enabled by default; appstate and powershell passthrough are always opt-in. Disable individual types with --no-passthrough <name>. --readonly-root is mutually exclusive with --root and does not change passthrough defaults.", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "exec [flags] <job-name> -- <command> [args...]", Short: "create a Job Silo and launch a command", Long: "Create a named Job Silo, optionally install root and scoped mappings, and launch a command inside it. With --root, executable, PATH, current-directory, Git-root, and app-execution-alias passthrough are enabled by default; appstate and powershell passthrough are always opt-in. Disable individual types with --no-passthrough <name>. --readonly-root is mutually exclusive with --root and does not change passthrough defaults. Use --no-ui-restrictions for applications such as Electron that create nested Job Objects.", DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error {
 		// Only treat -h/--help as a help request when it appears before the
 		// "--" separator; after it the payload belongs to the child command.
 		for _, arg := range args {

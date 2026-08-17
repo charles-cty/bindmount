@@ -75,7 +75,7 @@ bindmount add [--silo <job>] <virtual-root> <target>
 bindmount add [--silo <job>] <root[+][=|==]target>
 bindmount remove [--silo <job>] <virtual-root>
 bindmount list [--silo <job>] [<volume-path>]
-bindmount exec [--detach] [--verbose] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]
+bindmount exec [--detach] [--verbose] [--no-ui-restrictions] [--root data-dir | --readonly-root] [--passthrough name|--no-passthrough name]... [--link root[+][=|==]target]... <job-name> -- <command> [args...]
 bindmount silo exists <job-name>
 bindmount silo kill <job-name>
 ```
@@ -106,6 +106,12 @@ persistent user state rather than launch-time dependencies:
 tree it maps every currently visible drive onto the same location with a
 read-only bind link, so the silo sees the real drive contents but cannot
 write to them. Unlike `--root`, it does not change the passthrough defaults.
+
+`--no-ui-restrictions` leaves `JobObjectBasicUIRestrictions` unset on the silo.
+Use it for applications such as Electron whose Chromium sandbox creates nested
+Job Objects; Windows cannot form a nested Job hierarchy when a participating
+job has UI restrictions. The process tree remains in the silo, and the other
+job limits and process mitigation policy remain enabled.
 
 `gitroot` uses `git rev-parse --show-toplevel`. If Git is not installed in
 `PATH`, or the current directory is not inside a Git repository, no Git-root

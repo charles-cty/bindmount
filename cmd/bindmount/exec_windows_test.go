@@ -141,6 +141,12 @@ func TestExecRequiresCommandSeparator(t *testing.T) {
 	}
 }
 
+func TestExecHelpDescribesNoUIRestrictions(t *testing.T) {
+	if !strings.Contains(execUsage, "--no-ui-restrictions") {
+		t.Fatalf("exec usage does not describe --no-ui-restrictions: %s", execUsage)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // splitLinkSpec
 // ---------------------------------------------------------------------------
