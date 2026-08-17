@@ -13,11 +13,19 @@ import (
 // query the silo state.
 
 const (
+	JobObjectBasicUIRestrictions      = 4
 	JobObjectCreateSilo               = 35 // JOBOBJECTINFOCLASS value used by hcsshim
 	JobObjectExtendedLimitInformation = 9
 	JobObjectSiloBasicInformation     = 37
 
 	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+	// UI-restriction flags for JobObjectBasicUIRestrictions
+	// (JOBOBJECT_BASIC_UI_RESTRICTIONS.UIRestrictionsClass).
+	JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS = 0x00000008 // block SystemParametersInfo changes
+	JOB_OBJECT_UILIMIT_DISPLAYSETTINGS  = 0x00000010 // block ChangeDisplaySettings
+	JOB_OBJECT_UILIMIT_DESKTOP          = 0x00000040 // block CreateDesktop / SwitchDesktop
+	JOB_OBJECT_UILIMIT_EXITWINDOWS      = 0x00000080 // block ExitWindows / ExitWindowsEx
 )
 
 var (
@@ -197,6 +205,33 @@ func MakeHandleInheritable(handle Handle) error {
 			return callErr
 		}
 		return fmt.Errorf("SetHandleInformation failed")
+	}
+	return nil
+}
+
+// jobobjectBasicUIRestrictions mirrors JOBOBJECT_BASIC_UI_RESTRICTIONS.
+type jobobjectBasicUIRestrictions struct {
+	UIRestrictionsClass uint32
+}
+
+// SetJobUIRestrictions configures the UI-restriction class on the job via
+// JobObjectBasicUIRestrictions. Call this before assigning processes: some
+// restrictions are enforced at process-attach time and cannot be applied
+// retroactively.
+// Callers combine JOB_OBJECT_UILIMIT_* constants.
+func SetJobUIRestrictions(job Handle, flags uint32) error {
+	info := jobobjectBasicUIRestrictions{UIRestrictionsClass: flags}
+	r, _, callErr := procSetInformationJobObject.Call(
+		uintptr(job),
+		uintptr(JobObjectBasicUIRestrictions),
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Sizeof(info)),
+	)
+	if r == 0 {
+		if callErr != syscall.Errno(0) {
+			return callErr
+		}
+		return fmt.Errorf("SetInformationJobObject(BasicUIRestrictions) failed")
 	}
 	return nil
 }

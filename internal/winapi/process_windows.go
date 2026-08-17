@@ -33,6 +33,27 @@ const PROC_THREAD_ATTRIBUTE_PACKAGE_FULL_NAME = 29 | 0x00020000
 
 const EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 
+// PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY sets security-mitigation policies
+// on the spawned process at creation time. Number=7, Thread=FALSE, Input=TRUE.
+// => 7 | 0x00020000 = 0x00020007
+const PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY = 7 | 0x00020000
+
+const (
+	// ProcessCreationMitigationPolicyImageLoadNoRemoteAlwaysOn rejects images
+	// loaded from remote (UNC/network) paths. Occupies bits 52-55 of Policy1.
+	ProcessCreationMitigationPolicyImageLoadNoRemoteAlwaysOn uint64 = 1 << 52
+	// ProcessCreationMitigationPolicyExtensionPointDisableAlwaysOn blocks
+	// SetWindowsHookEx, AppInit_DLLs, and other legacy extension-point DLL
+	// injection vectors. Occupies bits 32-35 of Policy1.
+	ProcessCreationMitigationPolicyExtensionPointDisableAlwaysOn uint64 = 1 << 32
+)
+
+// DefaultChildMitigationPolicy1 is the combined hardening mask passed as the
+// first policy qword to PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY for every
+// child process launched by this tool.
+const DefaultChildMitigationPolicy1 = ProcessCreationMitigationPolicyImageLoadNoRemoteAlwaysOn |
+	ProcessCreationMitigationPolicyExtensionPointDisableAlwaysOn
+
 var (
 	procInitializeProcThreadAttributeList = modkernel32.NewProc("InitializeProcThreadAttributeList")
 	procUpdateProcThreadAttribute         = modkernel32.NewProc("UpdateProcThreadAttribute")

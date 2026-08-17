@@ -155,6 +155,15 @@ func cmdExecInner(args []string) (err error) {
 	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
 		return fmt.Errorf("configure job: %w", err)
 	}
+	// Prevent silo processes from changing system/display settings, creating
+	// desktops, or triggering system shutdown.
+	const siloUIRestrictions = winapi.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
+		winapi.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+		winapi.JOB_OBJECT_UILIMIT_DESKTOP |
+		winapi.JOB_OBJECT_UILIMIT_EXITWINDOWS
+	if err := winapi.SetJobUIRestrictions(job, siloUIRestrictions); err != nil {
+		return fmt.Errorf("configure job UI restrictions: %w", err)
+	}
 	if err := winapi.PromoteToSilo(job); err != nil {
 		return fmt.Errorf("promote job to silo: %w", err)
 	}

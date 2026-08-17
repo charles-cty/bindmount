@@ -55,11 +55,11 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 	// quoting rule follows the CRT/CommandLineToArgvW convention.
 	cmdLine := buildCommandLine(cmdArgs)
 
-	// Number of attributes: always the job list, plus package name when given.
-	attrCount := uint32(1)
+	// Number of attributes: job list + mitigation policy, plus package name when given.
+	attrCount := uint32(2)
 	var pkgName16 []uint16
 	if packageName != "" {
-		attrCount = 2
+		attrCount = 3
 		pkgName16 = syscall.StringToUTF16(packageName) // includes null terminator
 	}
 
@@ -83,6 +83,20 @@ func runInSilo(job syscall.Handle, cmdArgs []string, detach bool, packageName st
 		unsafe.Sizeof(jobHandle),
 	); err != nil {
 		return 0, fmt.Errorf("UpdateProcThreadAttribute(JOB_LIST): %w", err)
+	}
+
+	// Apply process hardening: reject remote-image loads and block legacy
+	// extension-point DLL injection vectors (SetWindowsHookEx, AppInit_DLLs).
+	// Best-effort: the silo job assignment is the primary security boundary.
+	mitigationPolicy := winapi.DefaultChildMitigationPolicy1
+	if err := winapi.UpdateProcThreadAttribute(
+		attrList,
+		0,
+		winapi.PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+		unsafe.Pointer(&mitigationPolicy),
+		unsafe.Sizeof(mitigationPolicy),
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "bindmount: mitigation policy not set (%v)\n", err)
 	}
 
 	if len(pkgName16) > 0 {
@@ -159,9 +173,43 @@ func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint3
 		return 0, err
 	}
 
-	var si syscall.StartupInfo
-	si.Cb = uint32(unsafe.Sizeof(si))
-	inheritStandardHandles(&si)
+	// Apply process hardening via a minimal attribute list. Unlike the primary
+	// path, PROC_THREAD_ATTRIBUTE_JOB_LIST is not used here (it is precisely
+	// that attribute whose failure drives us into this fallback). Mitigation
+	// policies have been supported since Windows 8.1, so they succeed on the
+	// same builds that reach this path.
+	var si winapi.StartupInfoEx
+	creationFlags := uint32(winapi.CREATE_SUSPENDED)
+
+	var attrSize uintptr
+	winapi.InitializeProcThreadAttributeList(nil, 1, 0, &attrSize)
+	if attrSize > 0 {
+		attrList := winapi.ProcThreadAttributeList(make([]byte, attrSize))
+		if winapi.InitializeProcThreadAttributeList(attrList, 1, 0, &attrSize) == nil {
+			mitigationPolicy := winapi.DefaultChildMitigationPolicy1
+			if winapi.UpdateProcThreadAttribute(
+				attrList, 0,
+				winapi.PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+				unsafe.Pointer(&mitigationPolicy),
+				unsafe.Sizeof(mitigationPolicy),
+			) == nil {
+				defer winapi.DeleteProcThreadAttributeList(attrList)
+				si.StartupInfo.Cb = uint32(unsafe.Sizeof(si))
+				si.AttributeList = unsafe.Pointer(&attrList[0])
+				creationFlags |= winapi.EXTENDED_STARTUPINFO_PRESENT
+			} else {
+				winapi.DeleteProcThreadAttributeList(attrList)
+				fmt.Fprintf(os.Stderr, "bindmount: fallback mitigation policy not set\n")
+			}
+		}
+	}
+	if si.AttributeList == nil {
+		// Attribute list setup failed; use plain STARTUPINFO size so Windows
+		// does not attempt to read the (absent) attribute list pointer.
+		si.StartupInfo.Cb = uint32(unsafe.Sizeof(si.StartupInfo))
+	}
+	inheritStandardHandles(&si.StartupInfo)
+
 	var pi syscall.ProcessInformation
 	err = syscall.CreateProcess(
 		nil,
@@ -169,10 +217,10 @@ func runInSiloFallback(job syscall.Handle, cmdArgs []string, detach bool) (uint3
 		nil,
 		nil,
 		true,
-		winapi.CREATE_SUSPENDED,
+		creationFlags,
 		nil,
 		nil,
-		&si,
+		&si.StartupInfo,
 		&pi,
 	)
 	if err != nil {

@@ -37,8 +37,9 @@ func LogicalDriveLetters() ([]rune, error) { return nil, errENOSYS }
 
 func CreateJob(name string) (Handle, error)              { return 0, errENOSYS }
 func OpenJob(name string, access uint32) (Handle, error) { return 0, errENOSYS }
-func SetKillOnJobClose(job Handle) error                 { return errENOSYS }
-func PromoteToSilo(job Handle) error                     { return errENOSYS }
+func SetKillOnJobClose(job Handle) error                  { return errENOSYS }
+func SetJobUIRestrictions(job Handle, flags uint32) error { return errENOSYS }
+func PromoteToSilo(job Handle) error                      { return errENOSYS }
 func AssignProcessToJob(job, process Handle) error       { return errENOSYS }
 func ResumeThread(_ Handle) (uint32, error)             { return 0, errENOSYS }
 
