@@ -246,6 +246,61 @@ func TestSiloLookupNames(t *testing.T) {
 	}
 }
 
+func TestParseSiloExecArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantDetach bool
+		wantJob    string
+		wantCmd    []string
+		wantErr    string
+	}{
+		{name: "attached", args: []string{"demo", "--", "cmd.exe", "/c", "echo ok"}, wantJob: "demo", wantCmd: []string{"cmd.exe", "/c", "echo ok"}},
+		{name: "detached", args: []string{"--detach", "demo", "--", "pwsh.exe", "-Command", "Start-Sleep 1"}, wantDetach: true, wantJob: "demo", wantCmd: []string{"pwsh.exe", "-Command", "Start-Sleep 1"}},
+		{name: "missing separator", args: []string{"demo", "cmd.exe"}, wantErr: `requires "--"`},
+		{name: "missing command", args: []string{"demo", "--"}, wantErr: "requires a command"},
+		{name: "missing job", args: []string{"--detach", "--", "cmd.exe"}, wantErr: "exactly one job name"},
+		{name: "extra job", args: []string{"one", "two", "--", "cmd.exe"}, wantErr: "exactly one job name"},
+		{name: "unknown flag", args: []string{"--unknown", "demo", "--", "cmd.exe"}, wantErr: "unknown silo exec flag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSiloExecArgs(tc.args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseSiloExecArgs(%q) error = %v, want %q", tc.args, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.detach != tc.wantDetach || got.jobName != tc.wantJob || !slices.Equal(got.cmdArgs, tc.wantCmd) {
+				t.Fatalf("parseSiloExecArgs(%q) = %#v, want detach=%v job=%q cmd=%#v", tc.args, got, tc.wantDetach, tc.wantJob, tc.wantCmd)
+			}
+		})
+	}
+}
+
+func TestMatchesProcessName(t *testing.T) {
+	cases := []struct {
+		name, query string
+		want        bool
+	}{
+		{"node.exe", "node.exe", true},
+		{"node.exe", "NODE.EXE", true},
+		{"node.exe", "node", true},
+		{"node.exe", "NODE", true},
+		{"node.exe", "node.cmd", false},
+		{"node.exe", "nodejs", false},
+	}
+	for _, tc := range cases {
+		if got := matchesProcessName(tc.name, tc.query); got != tc.want {
+			t.Errorf("matchesProcessName(%q, %q) = %v, want %v", tc.name, tc.query, got, tc.want)
+		}
+	}
+}
+
 func TestExecRequiresCommandSeparator(t *testing.T) {
 	for _, args := range [][]string{
 		{"demo", "cmd.exe"},

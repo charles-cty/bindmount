@@ -42,6 +42,26 @@ On Linux,
 make build
 ```
 
+## Running silos
+
+Launch another command in an existing named silo:
+
+```powershell
+bindmount silo exec my-silo -- cmd.exe
+bindmount silo exec --detach my-silo -- pwsh.exe
+```
+
+Find the visible named silo containing a process by PID or executable name:
+
+```powershell
+bindmount silo find 1234
+bindmount silo find node
+```
+
+The lookup reports every visible named Job Silo that contains the process,
+including its name and Silo ID. Windows does not provide a way to resolve an
+unnamed or inaccessible silo back to a Job Object name.
+
 ## License
 
 MIT

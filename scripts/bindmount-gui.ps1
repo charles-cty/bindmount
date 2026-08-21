@@ -140,6 +140,17 @@ function Start-Bindmount([string[]]$Arguments) {
     return "Started bindmount exec (PID $($process.Id))."
 }
 
+function Test-BindmountSiloExists([string]$Name) {
+    $output = Invoke-Bindmount @('silo', 'exists', $Name)
+    if ($output -match 'does not exist') {
+        return $false
+    }
+    if ($output -match ' exists') {
+        return $true
+    }
+    throw "Unexpected response while checking silo ${Name}: $output"
+}
+
 function Add-Label($parent, [string]$caption, [int]$x, [int]$y) {
     $label = New-Object Windows.Forms.Label
     $label.Text = $caption
@@ -504,11 +515,27 @@ function Get-ExecArguments {
     return ,$arguments
 }
 
+function Get-ExistingSiloExecArguments {
+    $arguments = @('silo', 'exec', '--detach', $execName.Text, '--', $execCommand.Text)
+    $arguments += @($execArgs.Lines | Where-Object { $_.Trim() })
+    return ,$arguments
+}
+
 $execButton = Add-Button $execTab 'Create silo and run command' 20 495
 $execButton.Add_Click({
     Run-Action {
         if (-not $execName.Text -or -not $execCommand.Text) {
             throw 'Enter a silo name and command.'
+        }
+        if (Test-BindmountSiloExists $execName.Text) {
+            $confirmation = [Windows.Forms.MessageBox]::Show(
+                "Silo $($execName.Text) already exists. Enter this existing silo?`r`n`r`nThe root, passthrough, and link settings on this tab will be ignored.",
+                'Existing silo found', 'YesNo', 'Question')
+            if ($confirmation -eq 'Yes') {
+                $result = Start-Bindmount (Get-ExistingSiloExecArguments)
+                return $result
+            }
+            return 'Existing silo was not entered.'
         }
         Start-Bindmount (Get-ExecArguments -Detach)
     }

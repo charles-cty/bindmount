@@ -3,16 +3,118 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"os"
 	osExec "os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"bindmount/internal/bindfilter"
 	"bindmount/internal/winapi"
 )
+
+func TestSiloFindResolvesNamedSiloForPID(t *testing.T) {
+	name := fmt.Sprintf("bindmount-find-%d", syscall.Getpid())
+	job, err := winapi.CreateJob(name)
+	if err != nil {
+		t.Skipf("create named job: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+	if err := winapi.SetKillOnJobClose(job); err != nil {
+		t.Skipf("configure job: %v", err)
+	}
+	if err := winapi.PromoteToSilo(job); err != nil {
+		t.Skipf("promote job to silo: %v", err)
+	}
+	info, err := winapi.QuerySiloBasicInformation(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commandPath := os.Getenv("ComSpec")
+	if commandPath == "" {
+		commandPath = `C:\Windows\System32\cmd.exe`
+	}
+	command := syscall.StringToUTF16Ptr(commandPath + " /c exit 0")
+	var startupInfo syscall.StartupInfo
+	startupInfo.Cb = uint32(unsafe.Sizeof(startupInfo))
+	var processInfo syscall.ProcessInformation
+	if err := syscall.CreateProcess(nil, command, nil, nil, false, winapi.CREATE_SUSPENDED, nil, nil, &startupInfo, &processInfo); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.CloseHandle(processInfo.Thread)
+	defer syscall.CloseHandle(processInfo.Process)
+	defer syscall.TerminateProcess(processInfo.Process, 1)
+	if err := winapi.AssignProcessToJob(job, processInfo.Process); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	findErr := cmdSiloFind(strconv.FormatUint(uint64(processInfo.ProcessId), 10))
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = oldStdout
+	defer reader.Close()
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("silo %q (ID %d)", name, info.SiloID)
+	if !strings.Contains(string(output), want) {
+		t.Fatalf("silo find output = %q, want %q", output, want)
+	}
+}
+
+func TestSiloExecLaunchesInExistingSilo(t *testing.T) {
+	name := fmt.Sprintf("bindmount-enter-%d", syscall.Getpid())
+	job, err := winapi.CreateJob(name)
+	if err != nil {
+		t.Skipf("create named job: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+	if err := winapi.SetKillOnJobClose(job); err != nil {
+		t.Skipf("configure job: %v", err)
+	}
+	if err := winapi.PromoteToSilo(job); err != nil {
+		t.Skipf("promote job to silo: %v", err)
+	}
+
+	pwshPath, err := osExec.LookPath("pwsh.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdSiloExec([]string{name, "--", pwshPath, "-NoProfile", "-Command", "exit 0"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSiloExecRejectsNonSiloJob(t *testing.T) {
+	name := fmt.Sprintf("bindmount-not-silo-%d", syscall.Getpid())
+	job, err := winapi.CreateJob(name)
+	if err != nil {
+		t.Skipf("create named job: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+
+	err = cmdSiloExec([]string{name, "--", "cmd.exe", "/c", "exit 0"})
+	if err == nil || !strings.Contains(err.Error(), "is not a Job Silo") {
+		t.Fatalf("cmdSiloExec(non-silo) error = %v, want non-silo error", err)
+	}
+}
 
 // TestSiloScopedBindLinkIntegration exercises the complete contract that is
 // otherwise difficult to validate with unit tests: a promoted Job Silo gets a

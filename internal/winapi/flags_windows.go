@@ -32,8 +32,10 @@ const (
 // Job object access rights (public Win32 constants).
 const (
 	JOB_OBJECT_ALL_ACCESS = 0x1F001F
-	JOB_OBJECT_QUERY      = 0x0400
+	JOB_OBJECT_QUERY      = 0x0004
 	JOB_OBJECT_TERMINATE  = 0x0008
+
+	PROCESS_QUERY_INFORMATION = 0x0400
 )
 
 // Handle is the job/process handle type used across this package. On Windows

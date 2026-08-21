@@ -16,7 +16,7 @@ const (
 	JobObjectBasicUIRestrictions      = 4
 	JobObjectCreateSilo               = 35 // JOBOBJECTINFOCLASS value used by hcsshim
 	JobObjectExtendedLimitInformation = 9
-	JobObjectSiloBasicInformation     = 37
+	JobObjectSiloBasicInformation     = 36
 
 	JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 
@@ -29,12 +29,14 @@ const (
 )
 
 var (
-	procCreateJobObjectW         = modkernel32.NewProc("CreateJobObjectW")
-	procOpenJobObjectW           = modkernel32.NewProc("OpenJobObjectW")
-	procSetInformationJobObject  = modkernel32.NewProc("SetInformationJobObject")
-	procAssignProcessToJobObject = modkernel32.NewProc("AssignProcessToJobObject")
-	procSetHandleInformation     = modkernel32.NewProc("SetHandleInformation")
-	procTerminateJobObject       = modkernel32.NewProc("TerminateJobObject")
+	procCreateJobObjectW          = modkernel32.NewProc("CreateJobObjectW")
+	procOpenJobObjectW            = modkernel32.NewProc("OpenJobObjectW")
+	procSetInformationJobObject   = modkernel32.NewProc("SetInformationJobObject")
+	procQueryInformationJobObject = modkernel32.NewProc("QueryInformationJobObject")
+	procAssignProcessToJobObject  = modkernel32.NewProc("AssignProcessToJobObject")
+	procIsProcessInJob            = modkernel32.NewProc("IsProcessInJob")
+	procSetHandleInformation      = modkernel32.NewProc("SetHandleInformation")
+	procTerminateJobObject        = modkernel32.NewProc("TerminateJobObject")
 )
 
 const handleFlagInherit = 0x00000001
@@ -191,6 +193,24 @@ func AssignProcessToJob(job, process Handle) error {
 	return nil
 }
 
+// IsProcessInJob reports whether process belongs to job, including through a
+// nested job relationship.
+func IsProcessInJob(process, job Handle) (bool, error) {
+	var inJob int32
+	r, _, callErr := procIsProcessInJob.Call(
+		uintptr(process),
+		uintptr(job),
+		uintptr(unsafe.Pointer(&inJob)),
+	)
+	if r == 0 {
+		if callErr != syscall.Errno(0) {
+			return false, callErr
+		}
+		return false, fmt.Errorf("IsProcessInJob failed")
+	}
+	return inJob != 0, nil
+}
+
 // MakeHandleInheritable allows a detached child to keep the Job Object alive
 // after bindmount exits. Descendants keep it only when their creator enables
 // handle inheritance; a dedicated keeper is needed for stronger guarantees.
@@ -209,6 +229,36 @@ func MakeHandleInheritable(handle Handle) error {
 // jobobjectBasicUIRestrictions mirrors JOBOBJECT_BASIC_UI_RESTRICTIONS.
 type jobobjectBasicUIRestrictions struct {
 	UIRestrictionsClass uint32
+}
+
+// SiloBasicInformation identifies a Job Silo and describes its current
+// process membership.
+type SiloBasicInformation struct {
+	SiloID            uint32
+	SiloParentID      uint32
+	NumberOfProcesses uint32
+	IsInServerSilo    bool
+	Reserved          [3]uint8
+}
+
+// QuerySiloBasicInformation returns the identity and basic state of a Job
+// Silo. The call fails when job is not a silo.
+func QuerySiloBasicInformation(job Handle) (SiloBasicInformation, error) {
+	var info SiloBasicInformation
+	r, _, callErr := procQueryInformationJobObject.Call(
+		uintptr(job),
+		uintptr(JobObjectSiloBasicInformation),
+		uintptr(unsafe.Pointer(&info)),
+		uintptr(unsafe.Sizeof(info)),
+		0,
+	)
+	if r == 0 {
+		if callErr != syscall.Errno(0) {
+			return SiloBasicInformation{}, callErr
+		}
+		return SiloBasicInformation{}, fmt.Errorf("QueryInformationJobObject(SiloBasicInformation) failed")
+	}
+	return info, nil
 }
 
 // SetJobUIRestrictions configures the UI-restriction class on the job via
