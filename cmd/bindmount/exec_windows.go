@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -183,6 +184,15 @@ func cmdExecInner(args []string) (err error) {
 			return err
 		}
 	}
+	if passthrough["powershell"] {
+		tempDir, err := prepareSiloTempDirectory(os.Getenv("LOCALAPPDATA"), jobName)
+		if err != nil {
+			return fmt.Errorf("prepare silo temp directory: %w", err)
+		}
+		if err := createTempMappings(job, tempDir, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
+			return err
+		}
+	}
 	if passthrough["path"] {
 		if err := createPathMappings(job, rootDir, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
@@ -218,13 +228,10 @@ func cmdExecInner(args []string) (err error) {
 		}
 	}
 
-	// Optional mapping: PowerShell profile/history and TEMP for WLDP script trust.
+	// Optional mapping: PowerShell profile/history for script trust.
 	// Enabled with --passthrough powershell.
 	if passthrough["powershell"] {
 		if err := createPowerShellMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
-			return err
-		}
-		if err := createTempMapping(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -275,24 +282,29 @@ func warnSkippedMapping(enabled bool, kind, root, target, reason string) {
 }
 
 func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
-	path = filepath.Clean(path)
-	if path == "." || path == "" {
+	return createPassthroughMappingTo(job, name, path, path, mapped, verbose, showSkippedWarnings)
+}
+
+func createPassthroughMappingTo(job syscall.Handle, name, virtualRoot, target string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
+	virtualRoot = filepath.Clean(virtualRoot)
+	target = filepath.Clean(target)
+	if virtualRoot == "." || virtualRoot == "" {
 		return nil
 	}
-	volume := filepath.VolumeName(path)
-	if volume != "" && path == filepath.Clean(volume+string(filepath.Separator)) {
+	volume := filepath.VolumeName(virtualRoot)
+	if volume != "" && virtualRoot == filepath.Clean(volume+string(filepath.Separator)) {
 		return nil
 	}
-	key := strings.ToLower(path)
+	key := strings.ToLower(virtualRoot)
 	if mapped[key] {
-		warnSkippedMapping(showSkippedWarnings, name+" passthrough", path, path, "virtual root is already mapped")
+		warnSkippedMapping(showSkippedWarnings, name+" passthrough", virtualRoot, target, "virtual root is already mapped")
 		return nil
 	}
-	if err := bindfilter.CreateSilo(job, path, path, bindfilter.Options{}); err != nil {
-		return fmt.Errorf("create %s passthrough %s -> %s: %w", name, path, path, err)
+	if err := bindfilter.CreateSilo(job, virtualRoot, target, bindfilter.Options{}); err != nil {
+		return fmt.Errorf("create %s passthrough %s -> %s: %w", name, virtualRoot, target, err)
 	}
 	if verbose {
-		fmt.Printf("bindmount: passthrough %s %s -> %s\n", name, path, path)
+		fmt.Printf("bindmount: passthrough %s %s -> %s\n", name, virtualRoot, target)
 	}
 	mapped[key] = true
 	return nil
@@ -467,20 +479,59 @@ func createPowerShellMappings(job syscall.Handle, mapped map[string]bool, verbos
 	return nil
 }
 
-// createTempMapping installs a writable passthrough for the user's %TEMP%
-// directory. WLDP's developer-mode script trust writes a record to %TEMP%
-// when evaluating PowerShell profile and script trust; without write access
-// the trust check fails and the session enters Constrained Language Mode.
-// The mapping is always installed regardless of --root / --readonly-root.
-func createTempMapping(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
-	temp := os.Getenv("TEMP")
-	if temp == "" {
-		temp = os.Getenv("TMP")
+func siloTempDirectory(localAppData, jobName string) (string, error) {
+	localAppData = filepath.Clean(localAppData)
+	if localAppData == "." || localAppData == "" || !filepath.IsAbs(localAppData) {
+		return "", errors.New("LOCALAPPDATA must be an absolute path")
 	}
-	if temp == "" {
-		return nil
+	jobHash := sha256.Sum256([]byte(jobName))
+	return filepath.Join(localAppData, "bindmount", "tempdirs", fmt.Sprintf("%x", jobHash)), nil
+}
+
+// prepareSiloTempDirectory clears the target used by a newly created silo.
+// Its deterministic, job-name-derived path lets a later launch remove stale
+// files left after a previous silo with the same name exited.
+func prepareSiloTempDirectory(localAppData, jobName string) (string, error) {
+	tempDir, err := siloTempDirectory(localAppData, jobName)
+	if err != nil {
+		return "", err
 	}
-	return createPassthroughMapping(job, "temp", temp, mapped, verbose, showSkippedWarnings)
+	if err := os.RemoveAll(tempDir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return "", err
+	}
+	return tempDir, nil
+}
+
+func tempMappingPaths(temp, tmp string) []string {
+	seen := make(map[string]bool)
+	paths := make([]string, 0, 2)
+	for _, path := range []string{temp, tmp} {
+		path = filepath.Clean(path)
+		if path == "." || path == "" || seen[strings.ToLower(path)] {
+			continue
+		}
+		seen[strings.ToLower(path)] = true
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// createTempMappings maps both %TEMP% and %TMP%, where defined, to the
+// silo-specific directory prepared under %LOCALAPPDATA%\bindmount\tempdirs.
+// WLDP's developer-mode script trust writes a record there when evaluating
+// PowerShell scripts; without the writable mapping, PowerShell can enter
+// Constrained Language Mode. This mapping is installed before PATH mappings so
+// a coincidental TEMP entry in PATH cannot retain a host-backed mapping.
+func createTempMappings(job syscall.Handle, tempDir string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
+	for _, virtualRoot := range tempMappingPaths(os.Getenv("TEMP"), os.Getenv("TMP")) {
+		if err := createPassthroughMappingTo(job, "temp", virtualRoot, tempDir, mapped, verbose, showSkippedWarnings); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // createAppExecMappings resolves every App Execution Alias (.exe reparse

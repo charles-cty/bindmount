@@ -300,3 +300,108 @@ func TestSiloRootPathDirectorySymbolicLink(t *testing.T) {
 		t.Fatalf("silo probe exited with code %d", exitCode)
 	}
 }
+
+func TestSiloTempMappingsUseDedicatedDirectory(t *testing.T) {
+	virtualTemp := filepath.Join(t.TempDir(), "temp")
+	virtualTmp := filepath.Join(t.TempDir(), "tmp")
+	for _, path := range []string{virtualTemp, virtualTmp} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	localAppData := t.TempDir()
+	t.Setenv("TEMP", virtualTemp)
+	t.Setenv("TMP", virtualTmp)
+	t.Setenv("LOCALAPPDATA", localAppData)
+
+	job, err := winapi.CreateJob("")
+	if err != nil {
+		t.Skipf("Job Objects unavailable: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
+		t.Skipf("cannot configure Job Object (elevation/policy): %v", err)
+	}
+	if err := winapi.PromoteToSilo(job); err != nil {
+		t.Skipf("Job Silo unavailable on this Windows build: %v", err)
+	}
+
+	tempDir, err := prepareSiloTempDirectory(localAppData, "temp-integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapped := make(map[string]bool)
+	if err := createTempMappings(job, tempDir, mapped, false, true); err != nil {
+		t.Skipf("Bind Filter silo mappings unavailable (driver/elevation): %v", err)
+	}
+	defer bindfilter.RemoveSilo(job, virtualTmp)
+	defer bindfilter.RemoveSilo(job, virtualTemp)
+
+	mappings, err := bindfilter.ListSilo(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTempMapping := func(virtualRoot string) {
+		t.Helper()
+		virtualInfo, err := os.Stat(virtualRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, mapping := range mappings {
+			if len(mapping.Targets) != 1 {
+				continue
+			}
+			mappingVirtualInfo, virtualErr := os.Stat(mapping.VirtualRoot)
+			mappingTargetInfo, targetErr := os.Stat(mapping.Targets[0])
+			if virtualErr == nil && targetErr == nil && os.SameFile(mappingVirtualInfo, virtualInfo) {
+				tempInfo, err := os.Stat(tempDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if os.SameFile(mappingTargetInfo, tempInfo) {
+					return
+				}
+			}
+		}
+		t.Fatalf("mapping %q -> %q was not returned by ListSilo: %#v", virtualRoot, tempDir, mappings)
+	}
+	assertTempMapping(virtualTemp)
+	assertTempMapping(virtualTmp)
+
+	pwshPath, err := osExec.LookPath("pwsh.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := "Set-Content -NoNewline -LiteralPath (Join-Path $env:TEMP 'temp.txt') -Value 'temp'; " +
+		"Set-Content -NoNewline -LiteralPath (Join-Path $env:TMP 'tmp.txt') -Value 'tmp'"
+	exitCode, err := runInSilo(job, []string{pwshPath, "-NoProfile", "-Command", probe}, false, "")
+	if shouldFallbackSiloLaunch(err) {
+		exitCode, err = runInSiloFallback(job, []string{pwshPath, "-NoProfile", "-Command", probe}, false)
+	}
+	if err != nil {
+		t.Fatalf("launch process in silo: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("silo probe exited with code %d", exitCode)
+	}
+
+	for _, item := range []struct {
+		name, contents string
+	}{
+		{"temp.txt", "temp"},
+		{"tmp.txt", "tmp"},
+	} {
+		contents, err := os.ReadFile(filepath.Join(tempDir, item.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(contents) != item.contents {
+			t.Fatalf("%s contents = %q, want %q", item.name, contents, item.contents)
+		}
+	}
+	for _, path := range []string{filepath.Join(virtualTemp, "temp.txt"), filepath.Join(virtualTmp, "tmp.txt")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("host temp path %q was unexpectedly written: %v", path, err)
+		}
+	}
+}

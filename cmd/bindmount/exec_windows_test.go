@@ -97,6 +97,58 @@ func TestPowerShellMappingPathsSkipMissingEnvironmentVariables(t *testing.T) {
 	}
 }
 
+func TestPrepareSiloTempDirectoryCleansPreviousContents(t *testing.T) {
+	localAppData := t.TempDir()
+	tempDir, err := prepareSiloTempDirectory(localAppData, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(localAppData, "bindmount", "tempdirs"); !strings.HasPrefix(strings.ToLower(tempDir), strings.ToLower(want)) {
+		t.Fatalf("temp directory = %q, want it below %q", tempDir, want)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "stale.txt"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(tempDir, "stale-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanedTempDir, err := prepareSiloTempDirectory(localAppData, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanedTempDir != tempDir {
+		t.Fatalf("cleaned temp directory = %q, want %q", cleanedTempDir, tempDir)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temp directory still contains %d entries", len(entries))
+	}
+
+	otherTempDir, err := siloTempDirectory(localAppData, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.EqualFold(otherTempDir, tempDir) {
+		t.Fatalf("different jobs share temp directory %q", tempDir)
+	}
+}
+
+func TestTempMappingPaths(t *testing.T) {
+	got := tempMappingPaths(`C:\Temp`, `C:\Temp`)
+	if len(got) != 1 || !strings.EqualFold(got[0], `C:\Temp`) {
+		t.Fatalf("duplicate TEMP/TMP paths = %#v, want one C:\\Temp path", got)
+	}
+
+	got = tempMappingPaths(`C:\Temp`, `D:\Tmp`)
+	if len(got) != 2 || !strings.EqualFold(got[0], `C:\Temp`) || !strings.EqualFold(got[1], `D:\Tmp`) {
+		t.Fatalf("distinct TEMP/TMP paths = %#v", got)
+	}
+}
+
 func TestProfileRelativeForDrive(t *testing.T) {
 	if got, ok := profileRelativeForDrive(`D:\Users\test`, 'D'); !ok || got != `Users\test` {
 		t.Fatalf("D: profile = %q, %v; want Users\\test, true", got, ok)
@@ -209,6 +261,13 @@ func TestExecRequiresCommandSeparator(t *testing.T) {
 func TestExecHelpDescribesNoUIRestrictions(t *testing.T) {
 	if !strings.Contains(execUsage, "--no-ui-restrictions") {
 		t.Fatalf("exec usage does not describe --no-ui-restrictions: %s", execUsage)
+	}
+}
+
+func TestExecHelpDescribesSiloTempDirectory(t *testing.T) {
+	command := newExecCommand()
+	if !strings.Contains(command.Long, "per-silo directory") || !strings.Contains(command.Long, "%LOCALAPPDATA%\\bindmount\\tempdirs") {
+		t.Fatalf("exec help does not describe the silo temp directory: %s", command.Long)
 	}
 }
 
