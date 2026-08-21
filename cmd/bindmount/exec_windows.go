@@ -184,7 +184,7 @@ func cmdExecInner(args []string) (err error) {
 		}
 	}
 	if passthrough["path"] {
-		if err := createPathMappings(job, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
+		if err := createPathMappings(job, rootDir, mappedPassthrough, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
@@ -298,7 +298,7 @@ func createPassthroughMapping(job syscall.Handle, name, path string, mapped map[
 	return nil
 }
 
-func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
+func createPathMappings(job syscall.Handle, rootDir string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
 	seen := make(map[string]bool)
 	for _, entry := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
 		path := filepath.Clean(strings.Trim(entry, `"`))
@@ -310,11 +310,93 @@ func createPathMappings(job syscall.Handle, mapped map[string]bool, verbose, sho
 		if err != nil || !info.IsDir() {
 			continue
 		}
+		if rootDir != "" {
+			linkTarget, resolvedTarget, isLink, err := directorySymbolicLink(path)
+			if err != nil {
+				return fmt.Errorf("inspect path passthrough %s: %w", path, err)
+			}
+			if isLink {
+				if _, err := stageDirectorySymbolicLink(rootDir, path, linkTarget); err != nil {
+					return fmt.Errorf("stage path passthrough link %s: %w", path, err)
+				}
+				if err := createPassthroughMapping(job, "path", resolvedTarget, mapped, verbose, showSkippedWarnings); err != nil {
+					return err
+				}
+				mapped[strings.ToLower(path)] = true
+				if verbose {
+					fmt.Printf("bindmount: staged path link %s -> %s\n", path, resolvedTarget)
+				}
+				continue
+			}
+		}
 		if err := createPassthroughMapping(job, "path", path, mapped, verbose, showSkippedWarnings); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func directorySymbolicLink(path string) (linkTarget, resolvedTarget string, isLink bool, err error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", "", false, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", "", false, nil
+	}
+	linkTarget, err = os.Readlink(path)
+	if err != nil {
+		return "", "", false, err
+	}
+	resolvedTarget, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", "", false, err
+	}
+	return linkTarget, filepath.Clean(resolvedTarget), true, nil
+}
+
+func rootBackingPath(rootDir, virtualPath string) (string, error) {
+	virtualPath = filepath.Clean(virtualPath)
+	volume := filepath.VolumeName(virtualPath)
+	if len(volume) != 2 || volume[1] != ':' {
+		return "", fmt.Errorf("%q is not on a drive-letter volume", virtualPath)
+	}
+	relative := strings.TrimLeft(virtualPath[len(volume):], `\`)
+	if relative == "" {
+		return "", fmt.Errorf("%q is a drive root", virtualPath)
+	}
+	return filepath.Join(rootDir, strings.ToUpper(volume[:1]), relative), nil
+}
+
+func stageDirectorySymbolicLink(rootDir, virtualPath, linkTarget string) (string, error) {
+	backingPath, err := rootBackingPath(rootDir, virtualPath)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(backingPath), 0o755); err != nil {
+		return "", err
+	}
+	if existing, err := os.Lstat(backingPath); err == nil {
+		if existing.Mode()&os.ModeSymlink == 0 {
+			return "", fmt.Errorf("%s already exists and is not a symbolic link", backingPath)
+		}
+		existingTarget, err := os.Readlink(backingPath)
+		if err != nil {
+			return "", err
+		}
+		if strings.EqualFold(existingTarget, linkTarget) {
+			return backingPath, nil
+		}
+		if err := os.Remove(backingPath); err != nil {
+			return "", err
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.Symlink(linkTarget, backingPath); err != nil {
+		return "", err
+	}
+	return backingPath, nil
 }
 
 func createAppStateMappings(job syscall.Handle, mapped map[string]bool, verbose, showSkippedWarnings bool) error {

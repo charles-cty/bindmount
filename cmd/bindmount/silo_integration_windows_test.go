@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	osExec "os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -87,6 +88,210 @@ func TestSiloScopedBindLinkIntegration(t *testing.T) {
 		// Silo job-list attributes are rejected on some Windows builds; use
 		// the same suspended-create fallback as cmdExec in that case.
 		exitCode, err = runInSiloFallback(job, []string{"pwsh.exe", "-Command", probe}, false)
+	}
+	if err != nil {
+		t.Fatalf("launch process in silo: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("silo probe exited with code %d", exitCode)
+	}
+}
+
+// TestSiloScopedBindLinkDirectorySymlinkVirtualRoot records the driver's
+// behavior when a directory symbolic link is used as a Bind Filter root.
+func TestSiloScopedBindLinkDirectorySymlinkVirtualRoot(t *testing.T) {
+	root := t.TempDir()
+	physical := filepath.Join(root, "physical")
+	target := filepath.Join(root, "target")
+	alias := filepath.Join(root, "nodejs")
+	for _, path := range []string{physical, target} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("create directory symbolic link: %v", err)
+	}
+	const name = "node.exe"
+	if err := os.WriteFile(filepath.Join(physical, name), []byte("physical"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, name), []byte("backing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, resolvedTarget, isLink, err := directorySymbolicLink(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLink {
+		t.Fatal("directory symbolic link was not detected")
+	}
+	resolvedInfo, err := os.Stat(resolvedTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physicalInfo, err := os.Stat(physical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(resolvedInfo, physicalInfo) {
+		t.Fatalf("resolved target = %q, want directory %q", resolvedTarget, physical)
+	}
+
+	job, err := winapi.CreateJob("")
+	if err != nil {
+		t.Skipf("Job Objects unavailable: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
+		t.Skipf("cannot configure Job Object (elevation/policy): %v", err)
+	}
+	if err := winapi.PromoteToSilo(job); err != nil {
+		t.Skipf("Job Silo unavailable on this Windows build: %v", err)
+	}
+	if err := bindfilter.CreateSilo(job, alias, target, bindfilter.Options{}); err != nil {
+		t.Skipf("Bind Filter silo mappings unavailable (driver/elevation): %v", err)
+	}
+	defer bindfilter.RemoveSilo(job, alias)
+	mappings, err := bindfilter.ListSilo(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedMappingTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, mapping := range mappings {
+		if strings.EqualFold(filepath.Clean(mapping.VirtualRoot), filepath.Clean(resolvedTarget)) &&
+			len(mapping.Targets) == 1 &&
+			strings.EqualFold(filepath.Clean(mapping.Targets[0]), filepath.Clean(resolvedMappingTarget)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("directory-link root was not recorded as %q: %#v", resolvedTarget, mappings)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(alias, name)); err != nil {
+		t.Fatal(err)
+	} else if string(got) != "physical" {
+		t.Fatalf("host unexpectedly observed silo mapping: got %q", got)
+	}
+
+	probePath := filepath.Join(alias, name)
+	probe := "if ((Get-Content -Raw -LiteralPath '" + strings.ReplaceAll(probePath, "'", "''") + "').Trim() -ne 'backing') { exit 1 }"
+	exitCode, err := runInSilo(job, []string{"pwsh.exe", "-Command", probe}, false, "")
+	if shouldFallbackSiloLaunch(err) {
+		exitCode, err = runInSiloFallback(job, []string{"pwsh.exe", "-Command", probe}, false)
+	}
+	if err != nil {
+		t.Fatalf("launch process in silo: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("silo probe exited with code %d", exitCode)
+	}
+}
+
+func TestSiloRootPathDirectorySymbolicLink(t *testing.T) {
+	hostRoot := t.TempDir()
+	physical := filepath.Join(hostRoot, "versions", "v22.18.0")
+	alias := filepath.Join(hostRoot, "nvm4w", "nodejs")
+	if err := os.MkdirAll(physical, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Skipf("create directory symbolic link: %v", err)
+	}
+	const name = "node.exe"
+	if err := os.WriteFile(filepath.Join(physical, name), []byte("physical"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	linkTarget, resolvedTarget, isLink, err := directorySymbolicLink(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLink {
+		t.Fatal("directory symbolic link was not detected")
+	}
+	rootDir := t.TempDir()
+	stagedPath, err := stageDirectorySymbolicLink(rootDir, alias, linkTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(stagedPath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("staged path %q is not a symbolic link", stagedPath)
+	}
+
+	volume := filepath.VolumeName(alias)
+	if len(volume) != 2 || volume[1] != ':' {
+		t.Skipf("test path %q is not on a drive-letter volume", alias)
+	}
+	rootBacking := filepath.Join(rootDir, strings.ToUpper(volume[:1]))
+	if err := os.MkdirAll(rootBacking, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := winapi.CreateJob("")
+	if err != nil {
+		t.Skipf("Job Objects unavailable: %v", err)
+	}
+	defer syscall.CloseHandle(job)
+	if err := winapi.SetJobLimitFlags(job, winapi.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE); err != nil {
+		t.Skipf("cannot configure Job Object (elevation/policy): %v", err)
+	}
+	if err := winapi.PromoteToSilo(job); err != nil {
+		t.Skipf("Job Silo unavailable on this Windows build: %v", err)
+	}
+
+	driveRoot := volume + `\`
+	if err := bindfilter.CreateSilo(job, driveRoot, rootBacking, bindfilter.Options{}); err != nil {
+		t.Skipf("Bind Filter silo mappings unavailable (driver/elevation): %v", err)
+	}
+	defer bindfilter.RemoveSilo(job, driveRoot)
+
+	mappedPaths := make([]string, 0, 4)
+	defer func() {
+		for index := len(mappedPaths) - 1; index >= 0; index-- {
+			bindfilter.RemoveSilo(job, mappedPaths[index])
+		}
+	}()
+	mapSamePath := func(path string) {
+		if err := bindfilter.CreateSilo(job, path, path, bindfilter.Options{}); err != nil {
+			t.Fatalf("create silo mapping %s: %v", path, err)
+		}
+		mappedPaths = append(mappedPaths, path)
+	}
+	mapSamePath(resolvedTarget)
+	windowsDir := os.Getenv("SystemRoot")
+	if windowsDir == "" {
+		windowsDir = `C:\Windows`
+	}
+	mapSamePath(windowsDir)
+	pwshPath, err := osExec.LookPath("pwsh.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapSamePath(filepath.Dir(pwshPath))
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapSamePath(workingDir)
+
+	probePath := filepath.Join(alias, name)
+	probe := "if ((Get-Content -Raw -LiteralPath '" + strings.ReplaceAll(probePath, "'", "''") + "').Trim() -ne 'physical') { exit 1 }"
+	exitCode, err := runInSilo(job, []string{pwshPath, "-NoProfile", "-Command", probe}, false, "")
+	if shouldFallbackSiloLaunch(err) {
+		exitCode, err = runInSiloFallback(job, []string{pwshPath, "-NoProfile", "-Command", probe}, false)
 	}
 	if err != nil {
 		t.Fatalf("launch process in silo: %v", err)

@@ -341,6 +341,11 @@ Targeted controls narrowed what these bits do **not** promise:
 * `REPARSE_ON_FILES` and `NO_REPARSE_ON_ROOT` did not change child-file reads when the
   virtual root itself was a directory symlink. This does not test every reparse tag or
   root-handle operation.
+* Creating a mapping whose virtual root was itself a directory symlink caused
+  `BfGetMappings` to report the symlink's resolved physical directory as the virtual
+  root. A root-mode PATH passthrough therefore cannot expose such an alias with a Bind
+  Link alone: it must recreate the directory symlink in the isolated backing tree and
+  map the resolved target separately.
 
 Cloud Files ECP behavior requires a real Cloud Files placeholder/provider context;
 ordinary NTFS files cannot exercise it. Batched-removal semantics likewise belong to

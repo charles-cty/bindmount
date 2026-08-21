@@ -109,6 +109,71 @@ func TestProfileRelativeForDrive(t *testing.T) {
 	}
 }
 
+func TestStageDirectorySymbolicLink(t *testing.T) {
+	target := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "nvm4w", "nodejs")
+	if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("create directory symbolic link: %v", err)
+	}
+
+	linkTarget, resolved, isLink, err := directorySymbolicLink(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isLink {
+		t.Fatal("directory symbolic link was not detected")
+	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil {
+		t.Fatalf("stat resolved target: %v", err)
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat expected target: %v", err)
+	}
+	if !os.SameFile(resolvedInfo, targetInfo) {
+		t.Fatalf("resolved target = %q, want directory %q", resolved, target)
+	}
+
+	backingRoot := t.TempDir()
+	stagedPath, err := stageDirectorySymbolicLink(backingRoot, alias, linkTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantStagedPath, err := rootBackingPath(backingRoot, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stagedPath != wantStagedPath {
+		t.Fatalf("staged path = %q, want %q", stagedPath, wantStagedPath)
+	}
+	stagedTarget, err := os.Readlink(stagedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(stagedTarget, linkTarget) {
+		t.Fatalf("staged target = %q, want %q", stagedTarget, linkTarget)
+	}
+	if _, err := stageDirectorySymbolicLink(backingRoot, alias, linkTarget); err != nil {
+		t.Fatalf("reuse staged symbolic link: %v", err)
+	}
+
+	replacementTarget := t.TempDir()
+	if _, err := stageDirectorySymbolicLink(backingRoot, alias, replacementTarget); err != nil {
+		t.Fatalf("replace staged symbolic link: %v", err)
+	}
+	stagedTarget, err = os.Readlink(stagedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(stagedTarget, replacementTarget) {
+		t.Fatalf("replaced target = %q, want %q", stagedTarget, replacementTarget)
+	}
+}
+
 func TestSiloLookupNames(t *testing.T) {
 	cases := []struct {
 		name string
