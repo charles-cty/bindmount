@@ -1,5 +1,6 @@
 # Build and package bindmount for Windows.
-# Run from the repository root or from any directory with -ProjectRoot.
+# Can be invoked from any working directory; the default project root is the
+# parent directory of this script.
 
 [CmdletBinding()]
 param(
@@ -11,7 +12,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location -LiteralPath $ProjectRoot
+$ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
+Push-Location -LiteralPath $ProjectRoot
+
+try {
 
 $dist = Join-Path $ProjectRoot 'dist'
 $releaseDir = Join-Path $ProjectRoot 'release'
@@ -62,8 +66,12 @@ if (-not $Test -and -not $Vet -or $Release) {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'scripts/bindmount-gui.ps1') -Destination $dist -Force
 }
 
-if ($Release) {
-    Remove-Item -LiteralPath $releaseDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
-    Compress-Archive -Path (Join-Path $dist '*') -DestinationPath (Join-Path $releaseDir 'bindmount-windows-amd64.zip') -Force
+    if ($Release) {
+        Remove-Item -LiteralPath $releaseDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+        Compress-Archive -Path (Join-Path $dist '*') -DestinationPath (Join-Path $releaseDir 'bindmount-windows-amd64.zip') -Force
+    }
+}
+finally {
+    Pop-Location
 }
