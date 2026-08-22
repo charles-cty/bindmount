@@ -437,6 +437,167 @@ Add-Label $execTab 'Git repository root:' 20 465
 $execGitRepositoryRoot = Add-TextBox $execTab 180 461 660
 $execGitRepositoryRoot.Text = if ($gitRepositoryRoot) { $gitRepositoryRoot } else { '(none detected)' }
 $execGitRepositoryRoot.ReadOnly = $true
+
+function Get-MappingRootKey([string]$Path) {
+    if (-not $Path) { return $null }
+    try {
+        $normalized = [IO.Path]::GetFullPath($Path)
+    } catch {
+        $normalized = $Path
+    }
+    $pathRoot = [IO.Path]::GetPathRoot($normalized)
+    if ($pathRoot -and $normalized.Length -gt $pathRoot.Length) {
+        $normalized = $normalized.TrimEnd('\')
+    }
+    return $normalized.ToLowerInvariant()
+}
+
+function Get-LinkRoot([string]$Link) {
+    $separatorIndex = $Link.IndexOf('=')
+    if ($separatorIndex -le 0) { return $null }
+    $root = $Link.Substring(0, $separatorIndex)
+    if ($root.EndsWith('+')) {
+        $root = $root.Substring(0, $root.Length - 1)
+    }
+    return $root
+}
+
+function Add-AutomaticMapping([hashtable]$Mappings, [string]$Path, [string]$Source, [switch]$AllowDriveRoot) {
+    $key = Get-MappingRootKey $Path
+    if (-not $key) { return }
+    $pathRoot = [IO.Path]::GetPathRoot($key)
+    if (-not $AllowDriveRoot -and $pathRoot -and $key -eq $pathRoot.ToLowerInvariant()) {
+        return
+    }
+    if (-not $Mappings.ContainsKey($key)) {
+        $Mappings[$key] = $Source
+    }
+}
+
+function Get-AutomaticExecMappings {
+    $mappings = @{}
+    if ($execRoot.Checked -or $execReadOnlyRoot.Checked) {
+        $source = if ($execRoot.Checked) { '--root drive mapping' } else { '--readonly-root drive mapping' }
+        foreach ($driveRoot in [Environment]::GetLogicalDrives()) {
+            Add-AutomaticMapping $mappings $driveRoot $source -AllowDriveRoot
+        }
+    }
+    if ($execPowerShellPassthrough.Checked) {
+        foreach ($tempPath in @($env:TEMP, $env:TMP) | Select-Object -Unique) {
+            Add-AutomaticMapping $mappings $tempPath 'PowerShell temporary-directory passthrough'
+        }
+    }
+    if ($execPathPassthrough.Checked) {
+        foreach ($pathEntry in $env:PATH -split ';') {
+            $pathEntry = $pathEntry.Trim('"').Trim()
+            if ($pathEntry -and (Test-Path -LiteralPath $pathEntry -PathType Container)) {
+                Add-AutomaticMapping $mappings $pathEntry 'PATH passthrough'
+            }
+        }
+    }
+    if ($execCwdPassthrough.Checked) {
+        Add-AutomaticMapping $mappings $currentWorkingDirectory 'current-directory passthrough'
+    }
+    if ($execGitRootPassthrough.Checked -and $gitRepositoryRoot) {
+        Add-AutomaticMapping $mappings $gitRepositoryRoot 'Git-root passthrough'
+    }
+    if ($execAppStatePassthrough.Checked) {
+        foreach ($path in @($env:APPDATA, $env:LOCALAPPDATA, $env:ProgramData)) {
+            Add-AutomaticMapping $mappings $path 'application-state passthrough'
+        }
+    }
+    if ($execAppExecPassthrough.Checked -and $env:LOCALAPPDATA) {
+        $windowsApps = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
+        if (Test-Path -LiteralPath $windowsApps -PathType Container) {
+            Add-AutomaticMapping $mappings $windowsApps 'app-execution-alias passthrough'
+        }
+    }
+    if ($execPassthrough.Checked) {
+        $commandInfo = Get-Command -Name $execCommand.Text -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($commandInfo -and $commandInfo.Path) {
+            Add-AutomaticMapping $mappings ([IO.Path]::GetDirectoryName($commandInfo.Path)) 'executable-directory passthrough'
+        }
+    }
+    return $mappings
+}
+
+function Confirm-MaskedUserLinks {
+    $automaticMappings = Get-AutomaticExecMappings
+    $userMappings = @{}
+    $conflicts = @()
+    foreach ($line in ($execLinks.Lines | Where-Object { $_.Trim() })) {
+        $link = $line.Trim()
+        $root = Get-LinkRoot $link
+        $key = Get-MappingRootKey $root
+        if ($key -and $automaticMappings.ContainsKey($key)) {
+            $conflicts += [PSCustomObject]@{
+                Link = $link
+                Source = $automaticMappings[$key]
+            }
+        } elseif ($key -and $userMappings.ContainsKey($key)) {
+            $conflicts += [PSCustomObject]@{
+                Link = $link
+                Source = "earlier user link: $($userMappings[$key])"
+            }
+        } elseif ($key) {
+            $userMappings[$key] = $link
+        }
+    }
+    if ($conflicts.Count -eq 0) { return $true }
+
+    $dialog = New-Object Windows.Forms.Form
+    $dialog.Text = 'User links skipped by bindmount'
+    $dialog.ClientSize = New-Object Drawing.Size(760, 430)
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.StartPosition = 'CenterParent'
+
+    $summary = New-Object Windows.Forms.Label
+    $summary.Text = 'The following user links use virtual roots that bindmount maps first. They will be skipped.' +
+        "`r`n`r`nContinue creating the silo?"
+    $summary.Location = New-Object Drawing.Point(16, 14)
+    $summary.Size = New-Object Drawing.Size(728, 54)
+    $dialog.Controls.Add($summary)
+
+    $details = New-Object Windows.Forms.TextBox
+    $details.Multiline = $true
+    $details.ReadOnly = $true
+    $details.ScrollBars = 'Vertical'
+    $details.WordWrap = $false
+    $details.Font = New-Object Drawing.Font('Consolas', 10)
+    $details.Location = New-Object Drawing.Point(16, 76)
+    $details.Size = New-Object Drawing.Size(728, 292)
+    $details.Text = (($conflicts | ForEach-Object {
+        "User link: $($_.Link)`r`nMapped first by: $($_.Source)"
+    }) -join "`r`n`r`n")
+    $dialog.Controls.Add($details)
+
+    $continueButton = New-Object Windows.Forms.Button
+    $continueButton.Text = 'Continue'
+    $continueButton.DialogResult = [Windows.Forms.DialogResult]::Yes
+    $continueButton.Location = New-Object Drawing.Point(558, 384)
+    $continueButton.AutoSize = $true
+    $dialog.Controls.Add($continueButton)
+
+    $cancelButton = New-Object Windows.Forms.Button
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $cancelButton.Location = New-Object Drawing.Point(466, 384)
+    $cancelButton.AutoSize = $true
+    $dialog.Controls.Add($cancelButton)
+
+    $dialog.AcceptButton = $continueButton
+    $dialog.CancelButton = $cancelButton
+    try {
+        return $dialog.ShowDialog($form) -eq [Windows.Forms.DialogResult]::Yes
+    } finally {
+        $dialog.Dispose()
+    }
+}
+
 # Build the argument list for bindmount exec from the current GUI state.
 # Silo name and command validity are checked by the callers that need them.
 function Get-ExecArguments {
@@ -536,6 +697,9 @@ $execButton.Add_Click({
                 return $result
             }
             return 'Existing silo was not entered.'
+        }
+        if (-not (Confirm-MaskedUserLinks)) {
+            return 'Silo creation was cancelled.'
         }
         Start-Bindmount (Get-ExecArguments -Detach)
     }
