@@ -643,17 +643,74 @@ func createExecutableMapping(job syscall.Handle, executablePath string, mapped m
 	return createPassthroughMapping(job, "executable", virtualRoot, mapped, verbose, showSkippedWarnings)
 }
 
-func profileRelativeForDrive(profile string, letter rune) (string, bool) {
-	if profile == "" {
+func pathRelativeForDrive(path string, letter rune) (string, bool) {
+	if path == "" {
 		return "", false
 	}
-	cleaned := filepath.Clean(profile)
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		return "", false
+	}
 	volume := filepath.VolumeName(cleaned)
 	if !strings.EqualFold(volume, fmt.Sprintf("%c:", letter)) {
 		return "", false
 	}
 	relative := strings.TrimLeft(cleaned[len(volume):], `\`)
 	return relative, relative != ""
+}
+
+func profileRelativeForDrive(profile string, letter rune) (string, bool) {
+	return pathRelativeForDrive(profile, letter)
+}
+
+// rootInitializationPaths returns the host paths whose namespace anchors are
+// useful inside a --root silo. These are deliberately created only in the
+// backing tree; they are not passthrough mappings and therefore remain empty
+// until the caller installs an explicit mapping or creates content there.
+func rootInitializationPaths() []string {
+	paths := make([]string, 0, len(rootInitializationEnvironmentVariables))
+	for _, name := range rootInitializationEnvironmentVariables {
+		if value := os.Getenv(name); value != "" {
+			paths = append(paths, value)
+		}
+	}
+	return paths
+}
+
+var rootInitializationEnvironmentVariables = []string{
+	"USERPROFILE",
+	"PUBLIC",
+	"APPDATA",
+	"LOCALAPPDATA",
+	"ProgramFiles",
+	"ProgramFiles(x86)",
+	"ProgramW6432",
+	"ProgramData",
+	"CommonProgramFiles",
+	"CommonProgramFiles(x86)",
+	"CommonProgramW6432",
+	"TEMP",
+	"TMP",
+	"SystemRoot",
+	"WINDIR",
+}
+
+func rootRelativePathsForDrive(paths []string, letter rune) []string {
+	relatives := make([]string, 0, len(paths))
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		relative, ok := pathRelativeForDrive(path, letter)
+		if !ok {
+			continue
+		}
+		key := strings.ToLower(relative)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		relatives = append(relatives, relative)
+	}
+	return relatives
 }
 
 func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bool, verbose, showSkippedWarnings bool) error {
@@ -664,18 +721,19 @@ func createRootMappings(job syscall.Handle, dataDir string, mapped map[string]bo
 	if err != nil {
 		return fmt.Errorf("enumerate drives for root mappings: %w", err)
 	}
+	initializationPaths := rootInitializationPaths()
 	for _, letter := range drives {
 		root := fmt.Sprintf("%c:\\", letter)
 		target := filepath.Join(dataDir, string(letter))
 		if err := os.MkdirAll(target, 0o755); err != nil {
 			return fmt.Errorf("create root backing %s: %w", target, err)
 		}
-		// Pre-create the current profile's relative directory in its drive's backing
-		// tree without installing a corresponding bind link. This preserves the
-		// normal profile directory and its NTFS short-name alias in root mode.
-		if profileRelative, ok := profileRelativeForDrive(os.Getenv("USERPROFILE"), letter); ok {
-			if err := os.MkdirAll(filepath.Join(target, profileRelative), 0o755); err != nil {
-				return fmt.Errorf("create profile backing %s: %w", profileRelative, err)
+		// Pre-create common namespace anchors in the drive's backing tree without
+		// installing corresponding bind links. This keeps paths such as
+		// %APPDATA% and %ProgramFiles% resolvable while leaving them empty.
+		for _, relative := range rootRelativePathsForDrive(initializationPaths, letter) {
+			if err := os.MkdirAll(filepath.Join(target, relative), 0o755); err != nil {
+				return fmt.Errorf("create root backing %s: %w", relative, err)
 			}
 		}
 		if mapped[strings.ToLower(root)] {

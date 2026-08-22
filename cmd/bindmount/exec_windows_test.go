@@ -161,6 +161,39 @@ func TestProfileRelativeForDrive(t *testing.T) {
 	}
 }
 
+func TestRootRelativePathsForDrive(t *testing.T) {
+	paths := []string{
+		`D:\Users\test`,
+		`D:\Users\test\AppData\Roaming`,
+		`D:\Program Files`,
+		`D:\Users\test`,
+		`C:\ProgramData`,
+		`D:\`,
+		`D:relative`,
+		`\\server\share\state`,
+	}
+	want := []string{`Users\test`, `Users\test\AppData\Roaming`, `Program Files`}
+	if got := rootRelativePathsForDrive(paths, 'D'); !slices.Equal(got, want) {
+		t.Fatalf("rootRelativePathsForDrive = %#v, want %#v", got, want)
+	}
+}
+
+func TestRootInitializationPathsReadsCommonEnvironment(t *testing.T) {
+	for _, name := range rootInitializationEnvironmentVariables {
+		t.Setenv(name, "")
+	}
+	t.Setenv("USERPROFILE", `D:\Users\test`)
+	t.Setenv("APPDATA", `D:\Users\test\AppData\Roaming`)
+	t.Setenv("LOCALAPPDATA", `C:\Users\test\AppData\Local`)
+	t.Setenv("ProgramFiles", `D:\Program Files`)
+
+	got := rootInitializationPaths()
+	want := []string{`D:\Users\test`, `D:\Users\test\AppData\Roaming`, `C:\Users\test\AppData\Local`, `D:\Program Files`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rootInitializationPaths = %#v, want %#v", got, want)
+	}
+}
+
 func TestStageDirectorySymbolicLink(t *testing.T) {
 	target := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "nvm4w", "nodejs")
